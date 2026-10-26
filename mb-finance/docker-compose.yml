@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    image: mb-finance:latest
+    container_name: mb-finance
+    restart: unless-stopped
+    # Chỉ mở trên localhost của server; bên ngoài vào được duy nhất qua `tailscale serve`
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - mb-data:/data
+    environment:
+      # Package ID của app MB Bank; sửa lại sau khi app Android thu được mẫu thật
+      MB_PACKAGES: com.mbmobile
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mb-data:
