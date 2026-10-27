@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Database khi chạy thử trên máy (npm run dev) — không bao giờ commit
+mb-finance/server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Android Studio / Gradle
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
