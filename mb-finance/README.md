@@ -101,6 +101,24 @@ Tối đa 100 item/lần. Trả về `accepted[]` với `status` là `parsed | u
 
 `POST /api/v1/heartbeat` — `{ "pendingCount": 0, "appVersion": "0.1" }`, gửi mỗi vài giờ.
 
+## App Android (thư mục `android/`)
+
+Build tự động bằng GitHub Actions (`.github/workflows/android.yml`) mỗi khi thư mục `android/` thay đổi.
+APK nằm ở tab **Actions** → lần chạy mới nhất → mục **Artifacts** → `thu-chi-mb-apk`.
+
+- Không dùng thư viện ngoài nào trừ WorkManager; hàng đợi là SQLite gốc của Android.
+- `android/app/debug.keystore` là khoá ký cố định để bản build mới cài đè được bản cũ.
+  Giữ repo ở chế độ **Private**.
+- Mở được bằng Android Studio nếu sau này muốn sửa trực tiếp.
+
+Cài lần đầu trên điện thoại:
+
+1. Mở app → mục 1: cấp quyền đọc thông báo, cho phép chạy nền không giới hạn.
+2. Mục 2: nhập `https://<tên-máy>.<tailnet>.ts.net` và token → **Lưu** → **Thử kết nối**.
+3. Chờ MB Bank có một thông báo bất kỳ → mục 3 sẽ hiện app MB và package ID của nó.
+   Nếu package khác `com.mbmobile`: bấm chọn nó trong app, và sửa `MB_PACKAGES` trong
+   `docker-compose.yml` rồi chạy `docker compose up -d` + `reparse`.
+
 ## Phát triển trên máy tính
 
 ```bash
