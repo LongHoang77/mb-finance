@@ -18,7 +18,9 @@ RUN npm run build && npm prune --omit=dev
 
 # ---- Runtime ----
 FROM node:22-bookworm-slim
-ENV NODE_ENV=production \
+ARG GIT_SHA=dev
+ENV APP_VERSION=$GIT_SHA \
+    NODE_ENV=production \
     PORT=8080 \
     DB_FILE=/data/finance.db \
     WEB_DIR=/app/public
@@ -32,6 +34,6 @@ COPY --from=web /web/dist ./public
 USER node
 VOLUME ["/data"]
 EXPOSE 8080
-HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s --start-interval=3s \
   CMD node -e "fetch('http://127.0.0.1:8080/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

@@ -63,13 +63,29 @@ docker compose down && docker volume rm mb-finance_mb-data && docker compose up 
 # rồi tạo lại token: device:add phone
 ```
 
-## Cập nhật code
+## Tự động deploy
 
-```bash
-cd ~/mb-finance
-tar -xzf ~/mb-finance.tar.gz -C ~/mb-finance   # ghi đè bằng bản mới
-docker compose up -d --build
-```
+Server tự kiểm tra GitHub mỗi 2 phút (`deploy/auto-deploy.sh`, chạy bằng systemd timer).
+Push code lên nhánh `main` → khoảng 2–5 phút sau bản mới chạy. Phiên bản đang chạy hiện ở chân trang dashboard.
+
+- Chỉ sửa `android/` → server bỏ qua, không build lại.
+- Build lỗi → bản cũ vẫn chạy. Bản mới chạy nhưng không healthy → tự quay về bản cũ.
+- Bản lỗi không bị thử lại cho tới khi có commit mới.
+- **Đừng sửa code trực tiếp trên server**: mỗi lần deploy, thư mục repo bị đặt lại đúng như GitHub.
+
+Cài một lần: `bash ~/mb-finance-repo/mb-finance/deploy/install.sh`
+
+| Việc | Lệnh trên server |
+|---|---|
+| Xem toàn bộ tình trạng | `bash ~/mb-finance-repo/mb-finance/deploy/status.sh` |
+| Xem log deploy | `journalctl -u mb-finance-deploy -n 50` |
+| Deploy ngay, không chờ 2 phút | `sudo systemctl start mb-finance-deploy` |
+| Build lại dù không có code mới | `~/mb-finance-repo/mb-finance/deploy/auto-deploy.sh --force` |
+| Tạm dừng tự động deploy | `sudo systemctl stop mb-finance-deploy.timer` |
+
+Nhận thông báo trên điện thoại mỗi lần deploy (tuỳ chọn): cài app **ntfy**, đăng ký một topic khó đoán
+(vd `mbfin-8f3k2q`), rồi trên server: `mkdir -p ~/.config && echo 'NTFY_TOPIC=mbfin-8f3k2q' > ~/.config/mb-finance-deploy.env`.
+Thông báo chỉ chứa mã phiên bản và tiêu đề commit, không có dữ liệu tài chính.
 
 Dữ liệu nằm trong Docker volume `mb-finance_mb-data`, không mất khi build lại.
 Migration mới (file `server/migrations/00X_*.sql`) tự chạy khi container khởi động.

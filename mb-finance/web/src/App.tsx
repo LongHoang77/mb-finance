@@ -5,6 +5,7 @@ type Tab = 'overview' | 'transactions';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('overview');
+  const status = useLoad<Status>('/api/v1/status');
   return (
     <div className="shell">
       <header className="top">
@@ -15,7 +16,10 @@ export default function App() {
         </nav>
       </header>
       <main>{tab === 'overview' ? <Overview /> : <Transactions />}</main>
-      <footer>Số liệu lấy từ thông báo MB Bank trên điện thoại, không phải sao kê chính thức.</footer>
+      <footer>
+        Số liệu lấy từ thông báo MB Bank trên điện thoại, không phải sao kê chính thức.
+        {status.data && <div>Phiên bản {status.data.version} · chạy từ {when(status.data.startedAt)}</div>}
+      </footer>
     </div>
   );
 }

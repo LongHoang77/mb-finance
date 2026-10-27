@@ -10,6 +10,8 @@ export type Tx = {
 export type Summary = { totalIn: number; totalOut: number; net: number; count: number };
 export type Month = { month: string; totalIn: number; totalOut: number; count: number };
 export type Status = {
+  version: string;
+  startedAt: string;
   lastHeartbeat: { at: string; pendingCount: number; appVersion: string | null } | null;
   lastReceivedAt: string | null;
   unparsedCount: number;

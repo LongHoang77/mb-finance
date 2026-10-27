@@ -8,6 +8,8 @@ import { ingest } from './ingest.js';
 
 // Giờ Việt Nam cố định UTC+7 (không có giờ mùa hè)
 const VN = "'+7 hours'";
+const STARTED_AT = new Date().toISOString();
+const VERSION = process.env.APP_VERSION ?? 'dev';
 
 const NotificationSchema = z.object({
   clientUuid: z.string().uuid(),
@@ -165,7 +167,7 @@ export function createApp(db: DB, opts: { webDir?: string } = {}) {
       FROM seq WHERE prev_balance IS NOT NULL AND prev_balance + delta <> balance_after
       ORDER BY transaction_time DESC LIMIT 20
     `).all();
-    res.json({ lastHeartbeat: hb ?? null, lastReceivedAt: lastReceived ?? null, unparsedCount, unparsed, balanceGaps: gaps });
+    res.json({ version: VERSION, startedAt: STARTED_AT, lastHeartbeat: hb ?? null, lastReceivedAt: lastReceived ?? null, unparsedCount, unparsed, balanceGaps: gaps });
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'not_found' }));

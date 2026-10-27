@@ -1,6 +1,11 @@
+name: mb-finance
+
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     image: mb-finance:latest
     container_name: mb-finance
     restart: unless-stopped
