@@ -454,6 +454,7 @@ class MainActivity : Activity() {
 
         val sync = section("ĐỒNG BỘ")
         syncText = ui.text("", 14f).also { sync.addView(it) }
+        ui.add(sync, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
         ui.add(sync, ui.row(
             ui.button("Gửi ngay") {
                 Sync.kick(this)
@@ -559,6 +560,42 @@ class MainActivity : Activity() {
         toast("Đã lưu")
         Sync.schedulePeriodic(this)
         Sync.kick(this)
+    }
+
+    private fun scanNotifications() {
+        val listener = MbNotificationListener.instance
+        if (listener == null) {
+            AlertDialog.Builder(this)
+                .setTitle("Dịch vụ đọc thông báo không chạy")
+                .setMessage(
+                    "App chưa được hệ thống kết nối để đọc thông báo (dù có thể đã cấp quyền).\n\n" +
+                        "Vào Truy cập thông báo → tắt rồi bật lại Thu chi MB, kiểm tra Tự khởi chạy, " +
+                        "rồi thử lại."
+                )
+                .setPositiveButton("Mở cài đặt") { _, _ ->
+                    startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                }
+                .setNegativeButton("Đóng", null)
+                .show()
+            return
+        }
+        thread {
+            val added = try {
+                listener.scanActive()
+            } catch (e: Exception) {
+                -1
+            }
+            runOnUiThread {
+                toast(
+                    when {
+                        added < 0 -> "Không đọc được thanh thông báo"
+                        added == 0 -> "Không có thông báo MB mới trên thanh thông báo"
+                        else -> "Đã lưu thêm $added thông báo"
+                    }
+                )
+                render()
+            }
+        }
     }
 
     private fun testConnection() {
