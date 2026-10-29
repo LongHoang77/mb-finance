@@ -8,7 +8,8 @@ import android.service.notification.StatusBarNotification
 /**
  * Hệ thống gọi service này mỗi khi có thông báo mới (không cần chạy nền liên tục).
  * - Mọi app: chỉ đếm tên gói (để tìm đúng package MB Bank), KHÔNG lưu nội dung.
- * - App MB Bank đã chọn: lưu toàn bộ nội dung vào hàng đợi rồi kích hoạt gửi.
+ * - App MB Bank đã chọn: lưu toàn bộ nội dung vào hàng đợi rồi kích hoạt gửi
+ *   (thông báo không phải giao dịch tự xoá sau 7 ngày, xem Store.purgeNonTransactions).
  */
 class MbNotificationListener : NotificationListenerService() {
 

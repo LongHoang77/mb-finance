@@ -12,7 +12,8 @@ import java.util.UUID
 /**
  * Hàng đợi cục bộ: mọi thông báo MB Bank được ghi ở đây TRƯỚC khi gửi lên server,
  * nên mất mạng hay server lỗi cũng không mất dữ liệu.
- * Không xoá bản nào (kể cả đã gửi): bảng transactions và thống kê trong app dựa trên dữ liệu này.
+ * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
+ * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
 class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 2) {
 
@@ -180,6 +181,25 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     /** Thông báo của [pkg] không phân tích được thành giao dịch, mới nhất trước. */
     fun unparsed(pkg: String): List<Item> =
         query("WHERE package = ? AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC", arrayOf(pkg))
+
+    /** Xoá thông báo không phải giao dịch (OTP, quảng cáo…) cũ hơn [before]; giao dịch giữ mãi. */
+    fun purgeNonTransactions(before: Long) {
+        val ids = query(
+            "WHERE posted_at < ? AND id NOT IN (SELECT queue_id FROM transactions)", arrayOf(before.toString())
+        ).filter { !Parser.looksLikeTransaction(it.text) }.map { it.id }
+        if (ids.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (id in ids) db.delete("queue", "id = ?", arrayOf(id.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Nội dung thông báo gốc của 1 bản ghi queue. */
+    fun text(id: Long): String? = query("WHERE id = ?", arrayOf(id.toString())).firstOrNull()?.text
 
     fun pending(limit: Int): List<Item> = query("WHERE status = 'pending' ORDER BY id LIMIT $limit")
 

@@ -306,7 +306,49 @@ class MainActivity : Activity() {
             ui.money(if (t.isIn) t.amount else -t.amount, signed = true),
             15f, if (t.isIn) ui.green else ui.red, bold = true,
         )
-        return ui.split(left, amount).apply { setPadding(0, dp(10), 0, dp(10)) }
+        return ui.split(left, amount).apply {
+            setPadding(0, dp(10), 0, dp(10))
+            background = ui.pressable(ui.surface, 8)
+            setOnClickListener { showTx(t) }
+        }
+    }
+
+    /** Hộp thoại chi tiết 1 giao dịch, kèm nguyên văn thông báo MB. */
+    private fun showTx(t: Tx) {
+        val box = ui.vbox().apply { setPadding(dp(20), dp(8), dp(20), dp(8)) }
+        box.addView(ui.text(
+            ui.money(if (t.isIn) t.amount else -t.amount, signed = true),
+            26f, if (t.isIn) ui.green else ui.red, bold = true,
+        ))
+        box.addView(ui.text(if (t.isIn) "Tiền vào" else "Tiền ra", 13f, ui.muted))
+
+        fun field(label: String, value: String) {
+            ui.add(box, ui.text(label, 12f, ui.muted), 14)
+            box.addView(ui.text(value, 15f).apply { setTextIsSelectable(true) })
+        }
+        field("Ngày giao dịch", dayFmt.format(t.date).replaceFirstChar { it.uppercase() })
+        field(
+            "Giờ",
+            clockFmt.format(Instant.ofEpochMilli(t.time)) +
+                if (t.timeFromText) "" else " (thông báo không ghi giờ — đây là giờ máy nhận)",
+        )
+        field("Nội dung", t.description ?: "(không có)")
+        t.balanceAfter?.let { field("Số dư sau giao dịch", ui.money(it)) }
+        t.account?.let { field("Tài khoản", it) }
+        store.text(t.id)?.let { raw ->
+            ui.add(box, ui.text("Thông báo gốc", 12f, ui.muted), 14)
+            ui.add(box, ui.text(raw, 13f).apply {
+                setTextIsSelectable(true)
+                background = ui.rounded(ui.bg, 10)
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+            }, 4)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Chi tiết giao dịch")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Đóng", null)
+            .show()
     }
 
     // ------------------------------------------------------------------ tab Giao dịch
@@ -350,8 +392,8 @@ class MainActivity : Activity() {
         val unparsed = ledger.unparsed.filter { Ledger.monthOf(it.postedAt) == month }
         if (unparsed.isNotEmpty()) {
             val c = ui.card()
-            c.addView(ui.text("Thông báo không phải giao dịch (${unparsed.size})", 14f, bold = true))
-            c.addView(ui.text("OTP, quảng cáo… hoặc mẫu mới parser chưa đọc được.", 12f, ui.muted))
+            c.addView(ui.text("Giao dịch chưa đọc được (${unparsed.size})", 14f, bold = true))
+            c.addView(ui.text("Mẫu thông báo mới parser chưa hỗ trợ — chưa tính vào thống kê.", 12f, ui.muted))
             for (it in unparsed.take(20)) {
                 c.addView(ui.text(timeFmt.format(Instant.ofEpochMilli(it.postedAt)), 12f, ui.muted).apply {
                     setPadding(0, dp(10), 0, 0)

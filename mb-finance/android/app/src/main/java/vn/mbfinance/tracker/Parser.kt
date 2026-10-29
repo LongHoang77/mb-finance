@@ -34,6 +34,8 @@ object Parser {
     private val ACCOUNT = Regex("""TK\s*:?\s*([0-9xX*]{4,})""")
     // "ND: ..." tới hết chuỗi; cần ":" và đứng sau "|"/khoảng trắng để không khớp "ND" trong "VND"
     private val DESC = Regex("""(?:^|[|\s])ND\s*:\s*(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    // Số tiền có dấu +/-: dấu hiệu thông báo biến động số dư, kể cả mẫu mới parser chưa đọc được
+    private val SIGNED_MONEY = Regex("""[+-]\s*[\d.,]+\s*(?:VND|đ)""", RegexOption.IGNORE_CASE)
     private val SEPARATORS = Regex("""[.,\s]""")
     private val SPACES = Regex("""\s+""")
 
@@ -53,6 +55,9 @@ object Parser {
     } catch (e: DateTimeException) {
         null
     }
+
+    /** OTP, quảng cáo… → false. Mẫu giao dịch mới chưa parse được vẫn true để không bị mất. */
+    fun looksLikeTransaction(text: String) = parse(text) != null || SIGNED_MONEY.containsMatchIn(text)
 
     fun parse(text: String): Parsed? {
         val a = AMOUNT.find(text) ?: return null

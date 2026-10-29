@@ -51,9 +51,12 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
         val VN: ZoneId = ZoneId.of("Asia/Ho_Chi_Minh")
         val EMPTY = Ledger(emptyList(), emptyList())
 
+        /** Thông báo không phải giao dịch được giữ 7 ngày. */
+        private const val KEEP_OTHER_MS = 7L * 24 * 60 * 60 * 1000
+
         fun monthOf(ms: Long): YearMonth = YearMonth.from(Instant.ofEpochMilli(ms).atZone(VN))
 
-        /** Parser đổi phiên bản (hoặc lần đầu lên DB v2) thì phân tích lại toàn bộ trước khi đọc. */
+        /** Trước khi đọc: phân tích lại nếu Parser đổi phiên bản, xoá thông báo không phải giao dịch quá 7 ngày. */
         fun load(ctx: Context): Ledger {
             val store = Store.get(ctx)
             val settings = Settings(ctx)
@@ -62,9 +65,11 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
                     store.reparseAll()
                     settings.parserVersion = Parser.VERSION
                 }
+                store.purgeNonTransactions(System.currentTimeMillis() - KEEP_OTHER_MS)
             }
             val pkg = settings.mbPackage
-            return Ledger(store.transactions(pkg), store.unparsed(pkg))
+            // Bỏ OTP/quảng cáo đã lưu từ bản cũ, chỉ giữ mẫu giao dịch parser chưa đọc được
+            return Ledger(store.transactions(pkg), store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) })
         }
     }
 }
