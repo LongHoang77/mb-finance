@@ -38,6 +38,7 @@ class MbNotificationListener : NotificationListenerService() {
 
         if (store.enqueue(pkg, title, text, sbn.postTime)) {
             Sync.kick(this)
+            BalanceWidget.refresh(this)
         }
     }
 

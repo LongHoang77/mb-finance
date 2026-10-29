@@ -32,6 +32,11 @@ class Settings(ctx: Context) {
         get() = p.getString("mb_package", DEFAULT_MB_PACKAGE) ?: DEFAULT_MB_PACKAGE
         set(v) = p.edit().putString("mb_package", v).apply()
 
+    /** Phiên bản Parser đã dùng để điền bảng transactions. */
+    var parserVersion: Int
+        get() = p.getInt("parser_version", 0)
+        set(v) = p.edit().putInt("parser_version", v).apply()
+
     val lastOkAt: Long get() = p.getLong("last_ok", 0L)
     val lastError: String? get() = p.getString("last_error", null)
     val lastErrorAt: Long get() = p.getLong("last_error_at", 0L)

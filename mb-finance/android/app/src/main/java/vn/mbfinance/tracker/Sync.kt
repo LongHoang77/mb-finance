@@ -47,7 +47,6 @@ class Api(private val baseUrl: String, private val token: String) {
 object Sync {
     private const val SYNC_WORK = "sync"
     private const val HEARTBEAT_WORK = "heartbeat"
-    private const val KEEP_SYNCED_DAYS = 30L
 
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
@@ -110,7 +109,6 @@ object Sync {
                 store.markSynced(results)
             }
             s.markOk()
-            store.purgeSyncedBefore(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(KEEP_SYNCED_DAYS))
             ListenableWorker.Result.success()
         } catch (e: HttpError) {
             s.markError(

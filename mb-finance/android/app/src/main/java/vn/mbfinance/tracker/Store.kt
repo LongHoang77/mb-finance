@@ -5,13 +5,16 @@ import android.content.Context
 import android.database.DatabaseUtils
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import java.time.Instant
+import java.time.LocalDate
 import java.util.UUID
 
 /**
  * Hàng đợi cục bộ: mọi thông báo MB Bank được ghi ở đây TRƯỚC khi gửi lên server,
  * nên mất mạng hay server lỗi cũng không mất dữ liệu.
+ * Không xoá bản nào (kể cả đã gửi): bảng transactions và thống kê trong app dựa trên dữ liệu này.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 1) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 2) {
 
     data class Item(
         val id: Long,
@@ -46,9 +49,36 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         // Chỉ lưu TÊN GÓI và số lượng thông báo của mọi app (không lưu nội dung),
         // để tìm đúng package ID của MB Bank.
         db.execSQL("CREATE TABLE sources (package TEXT PRIMARY KEY, count INTEGER NOT NULL, last_seen INTEGER NOT NULL)")
+        createTransactions(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // v2: thêm bảng giao dịch; dữ liệu cũ được điền khi Ledger thấy Parser.VERSION thay đổi
+        if (oldVersion < 2) createTransactions(db)
+    }
+
+    /** Giao dịch phân tích từ queue (1-1), tách sẵn ngày/tháng/năm theo giờ VN. */
+    private fun createTransactions(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE transactions (
+              queue_id       INTEGER PRIMARY KEY REFERENCES queue(id) ON DELETE CASCADE,
+              amount         INTEGER NOT NULL,   -- VND, luôn dương
+              direction      TEXT NOT NULL,      -- 'in' | 'out'
+              balance_after  INTEGER,
+              account        TEXT,
+              description    TEXT,
+              tx_time        INTEGER NOT NULL,   -- epoch ms
+              tx_date        TEXT NOT NULL,      -- yyyy-MM-dd
+              tx_year        INTEGER NOT NULL,
+              tx_month       INTEGER NOT NULL,
+              tx_day         INTEGER NOT NULL,
+              time_from_text INTEGER NOT NULL    -- 1: giờ ghi trong thông báo, 0: giờ máy nhận thông báo
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX idx_tx_date ON transactions(tx_year, tx_month, tx_day)")
+    }
 
     fun recordSource(pkg: String, now: Long) {
         val db = writableDatabase
@@ -56,7 +86,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.execSQL("UPDATE sources SET count = count + 1, last_seen = ? WHERE package = ?", arrayOf<Any>(now, pkg))
     }
 
-    /** Trả về false nếu đã có (cùng app + cùng nội dung + cùng thời điểm). */
+    /** Lưu thông báo + giao dịch phân tích được. Trả về false nếu đã có (cùng app + nội dung + thời điểm). */
     fun enqueue(pkg: String, title: String?, text: String, postedAt: Long): Boolean {
         val cv = ContentValues().apply {
             put("uuid", UUID.randomUUID().toString())
@@ -65,17 +95,107 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             put("text", text.take(4000))
             put("posted_at", postedAt)
         }
-        return writableDatabase.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE) != -1L
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val id = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+            if (id == -1L) return false
+            saveParsed(db, id, text.take(4000), postedAt)
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
     }
+
+    private fun saveParsed(db: SQLiteDatabase, queueId: Long, text: String, postedAt: Long) {
+        val p = Parser.parse(text) ?: return
+        val time = p.time ?: postedAt
+        val d = Instant.ofEpochMilli(time).atZone(Ledger.VN).toLocalDate()
+        val cv = ContentValues().apply {
+            put("queue_id", queueId)
+            put("amount", p.amount)
+            put("direction", if (p.isIn) "in" else "out")
+            put("balance_after", p.balanceAfter)
+            put("account", p.account)
+            put("description", p.description)
+            put("tx_time", time)
+            put("tx_date", d.toString())
+            put("tx_year", d.year)
+            put("tx_month", d.monthValue)
+            put("tx_day", d.dayOfMonth)
+            put("time_from_text", if (p.time != null) 1 else 0)
+        }
+        db.insertWithOnConflict("transactions", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    /** Phân tích lại toàn bộ queue (sau khi sửa parser). */
+    @Synchronized
+    fun reparseAll() {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("transactions", null, null)
+            db.rawQuery("SELECT id, text, posted_at FROM queue", null).use { c ->
+                while (c.moveToNext()) saveParsed(db, c.getLong(0), c.getString(1), c.getLong(2))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Giao dịch của [pkg], mới nhất trước. */
+    fun transactions(pkg: String): List<Tx> {
+        val out = ArrayList<Tx>()
+        readableDatabase.rawQuery(
+            """
+            SELECT t.queue_id, t.amount, t.direction, t.balance_after, t.account, t.description,
+                   t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text
+            FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE q.package = ?
+            ORDER BY t.tx_time DESC, t.queue_id DESC
+            """.trimIndent(),
+            arrayOf(pkg),
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    Tx(
+                        id = c.getLong(0),
+                        amount = c.getLong(1),
+                        isIn = c.getString(2) == "in",
+                        balanceAfter = if (c.isNull(3)) null else c.getLong(3),
+                        account = if (c.isNull(4)) null else c.getString(4),
+                        description = if (c.isNull(5)) null else c.getString(5),
+                        time = c.getLong(6),
+                        date = LocalDate.of(c.getInt(7), c.getInt(8), c.getInt(9)),
+                        timeFromText = c.getInt(10) == 1,
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    /** Thông báo của [pkg] không phân tích được thành giao dịch, mới nhất trước. */
+    fun unparsed(pkg: String): List<Item> =
+        query("WHERE package = ? AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC", arrayOf(pkg))
 
     fun pending(limit: Int): List<Item> = query("WHERE status = 'pending' ORDER BY id LIMIT $limit")
 
     fun recent(limit: Int): List<Item> = query("ORDER BY id DESC LIMIT $limit")
 
-    private fun query(tail: String): List<Item> {
+    /** Đổi mỗi khi hàng đợi có bản ghi mới/bị xoá — dùng để biết khi nào cần tính lại thống kê. */
+    fun dataKey(): String =
+        readableDatabase.rawQuery("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM queue", null).use { c ->
+            c.moveToFirst()
+            "${c.getLong(0)}:${c.getLong(1)}"
+        }
+
+    private fun query(tail: String, args: Array<String>? = null): List<Item> {
         val out = ArrayList<Item>()
         readableDatabase.rawQuery(
-            "SELECT id, uuid, package, title, text, posted_at, status, server_status FROM queue $tail", null
+            "SELECT id, uuid, package, title, text, posted_at, status, server_status FROM queue $tail", args
         ).use { c ->
             while (c.moveToNext()) {
                 out.add(
@@ -122,11 +242,6 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             while (c.moveToNext()) out.add(Source(c.getString(0), c.getInt(1), c.getLong(2)))
         }
         return out
-    }
-
-    /** Xoá bản ghi ĐÃ GỬI cũ hơn mốc thời gian (bản chưa gửi không bao giờ bị xoá). */
-    fun purgeSyncedBefore(before: Long) {
-        writableDatabase.delete("queue", "status = 'synced' AND posted_at < ?", arrayOf(before.toString()))
     }
 
     companion object {

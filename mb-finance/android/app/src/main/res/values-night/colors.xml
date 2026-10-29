@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="w_bg">#F21A1D23</color>
+    <color name="w_fg">#E8EAED</color>
+    <color name="w_muted">#9AA0A6</color>
+    <color name="w_green">#4ADE80</color>
+    <color name="w_red">#F87171</color>
+</resources>
