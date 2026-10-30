@@ -7,28 +7,30 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 import java.util.UUID
 
 /**
- * Hàng đợi cục bộ: mọi thông báo MB Bank được ghi ở đây TRƯỚC khi gửi lên server,
- * nên mất mạng hay server lỗi cũng không mất dữ liệu.
+ * Dữ liệu chỉ nằm trên máy: thông báo MB Bank nguyên văn (queue), giao dịch phân tích từ đó và tag.
  * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
  * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 2) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 3) {
 
     data class Item(
         val id: Long,
-        val uuid: String,
         val pkg: String,
         val title: String?,
         val text: String,
         val postedAt: Long,
-        val status: String,
-        val serverStatus: String?,
     )
 
     data class Source(val pkg: String, val count: Int, val lastSeen: Long)
+
+    /** Số liệu cho widget, tính bằng SQL thay vì đọc hết bảng transactions. */
+    data class Brief(val totalIn: Long, val totalOut: Long, val balance: Long?, val lastTxTime: Long?) {
+        val net get() = totalIn - totalOut
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -51,11 +53,26 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         // để tìm đúng package ID của MB Bank.
         db.execSQL("CREATE TABLE sources (package TEXT PRIMARY KEY, count INTEGER NOT NULL, last_seen INTEGER NOT NULL)")
         createTransactions(db)
+        createTags(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // v2: thêm bảng giao dịch; dữ liệu cũ được điền khi Ledger thấy Parser.VERSION thay đổi
         if (oldVersion < 2) createTransactions(db)
+        // v3: tag thu chi (cột status/server_status của queue từ thời gửi server giờ bỏ không dùng)
+        if (oldVersion < 3) createTags(db)
+    }
+
+    /** Tag gắn theo queue_id (không theo bảng transactions vì bảng đó bị xoá/điền lại khi reparse). */
+    private fun createTags(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, color INTEGER NOT NULL)"
+        )
+        db.execSQL("CREATE TABLE tx_tags (queue_id INTEGER PRIMARY KEY, tag_id INTEGER NOT NULL)")
+        db.execSQL("CREATE INDEX idx_tx_tags_tag ON tx_tags(tag_id)")
+        DEFAULT_TAGS.forEachIndexed { i, name ->
+            db.execSQL("INSERT INTO tags(name, color) VALUES (?, ?)", arrayOf<Any>(name, TAG_COLORS[i % TAG_COLORS.size]))
+        }
     }
 
     /** Giao dịch phân tích từ queue (1-1), tách sẵn ngày/tháng/năm theo giờ VN. */
@@ -152,8 +169,10 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         readableDatabase.rawQuery(
             """
             SELECT t.queue_id, t.amount, t.direction, t.balance_after, t.account, t.description,
-                   t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text
+                   t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text, g.id, g.name, g.color
             FROM transactions t JOIN queue q ON q.id = t.queue_id
+            LEFT JOIN tx_tags tt ON tt.queue_id = t.queue_id
+            LEFT JOIN tags g ON g.id = tt.tag_id
             WHERE q.package = ?
             ORDER BY t.tx_time DESC, t.queue_id DESC
             """.trimIndent(),
@@ -171,11 +190,40 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         time = c.getLong(6),
                         date = LocalDate.of(c.getInt(7), c.getInt(8), c.getInt(9)),
                         timeFromText = c.getInt(10) == 1,
+                        tag = if (c.isNull(11)) null else Tag(c.getLong(11), c.getString(12), c.getInt(13)),
                     )
                 )
             }
         }
         return out
+    }
+
+    fun brief(pkg: String, month: YearMonth): Brief {
+        val db = readableDatabase
+        var totalIn = 0L
+        var totalOut = 0L
+        db.rawQuery(
+            """
+            SELECT t.direction, SUM(t.amount) FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE q.package = ? AND t.tx_year = ? AND t.tx_month = ? GROUP BY t.direction
+            """.trimIndent(),
+            arrayOf(pkg, month.year.toString(), month.monthValue.toString()),
+        ).use { c ->
+            while (c.moveToNext()) if (c.getString(0) == "in") totalIn = c.getLong(1) else totalOut = c.getLong(1)
+        }
+        // Cùng thứ tự với transactions(): số dư = giao dịch mới nhất có ghi số dư
+        fun latest(col: String, extra: String): Long? = db.rawQuery(
+            """
+            SELECT $col FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE q.package = ? $extra ORDER BY t.tx_time DESC, t.queue_id DESC LIMIT 1
+            """.trimIndent(),
+            arrayOf(pkg),
+        ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+        return Brief(
+            totalIn, totalOut,
+            balance = latest("t.balance_after", "AND t.balance_after IS NOT NULL"),
+            lastTxTime = latest("t.tx_time", ""),
+        )
     }
 
     /** Thông báo của [pkg] không phân tích được thành giao dịch, mới nhất trước. */
@@ -191,7 +239,10 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val db = writableDatabase
         db.beginTransaction()
         try {
-            for (id in ids) db.delete("queue", "id = ?", arrayOf(id.toString()))
+            for (id in ids) {
+                db.delete("queue", "id = ?", arrayOf(id.toString()))
+                db.delete("tx_tags", "queue_id = ?", arrayOf(id.toString()))
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -200,8 +251,6 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     /** Nội dung thông báo gốc của 1 bản ghi queue. */
     fun text(id: Long): String? = query("WHERE id = ?", arrayOf(id.toString())).firstOrNull()?.text
-
-    fun pending(limit: Int): List<Item> = query("WHERE status = 'pending' ORDER BY id LIMIT $limit")
 
     fun recent(limit: Int): List<Item> = query("ORDER BY id DESC LIMIT $limit")
 
@@ -215,19 +264,16 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     private fun query(tail: String, args: Array<String>? = null): List<Item> {
         val out = ArrayList<Item>()
         readableDatabase.rawQuery(
-            "SELECT id, uuid, package, title, text, posted_at, status, server_status FROM queue $tail", args
+            "SELECT id, package, title, text, posted_at FROM queue $tail", args
         ).use { c ->
             while (c.moveToNext()) {
                 out.add(
                     Item(
                         id = c.getLong(0),
-                        uuid = c.getString(1),
-                        pkg = c.getString(2),
-                        title = if (c.isNull(3)) null else c.getString(3),
-                        text = c.getString(4),
-                        postedAt = c.getLong(5),
-                        status = c.getString(6),
-                        serverStatus = if (c.isNull(7)) null else c.getString(7),
+                        pkg = c.getString(1),
+                        title = if (c.isNull(2)) null else c.getString(2),
+                        text = c.getString(3),
+                        postedAt = c.getLong(4),
                     )
                 )
             }
@@ -235,24 +281,56 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         return out
     }
 
-    fun markSynced(results: Map<String, String>) {
+    // ------------------------------------------------------------------ tag
+
+    fun tags(): List<Tag> {
+        val out = ArrayList<Tag>()
+        readableDatabase.rawQuery("SELECT id, name, color FROM tags ORDER BY id", null).use { c ->
+            while (c.moveToNext()) out.add(Tag(c.getLong(0), c.getString(1), c.getInt(2)))
+        }
+        return out
+    }
+
+    /** Thêm tag mới, màu xoay vòng theo bảng màu. null nếu trùng tên. */
+    fun addTag(name: String): Tag? {
+        val db = writableDatabase
+        val color = TAG_COLORS[(DatabaseUtils.queryNumEntries(db, "tags") % TAG_COLORS.size).toInt()]
+        val cv = ContentValues().apply {
+            put("name", name.trim())
+            put("color", color)
+        }
+        val id = db.insertWithOnConflict("tags", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+        return if (id == -1L) null else Tag(id, name.trim(), color)
+    }
+
+    /** false nếu trùng tên tag khác. */
+    fun renameTag(id: Long, name: String): Boolean {
+        val cv = ContentValues().apply { put("name", name.trim()) }
+        return writableDatabase.updateWithOnConflict("tags", cv, "id = ?", arrayOf(id.toString()), SQLiteDatabase.CONFLICT_IGNORE) > 0
+    }
+
+    /** Xoá tag; các giao dịch đang gắn tag này trở về "chưa gắn tag". */
+    fun deleteTag(id: Long) {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            for ((uuid, serverStatus) in results) {
-                db.execSQL(
-                    "UPDATE queue SET status = 'synced', server_status = ? WHERE uuid = ?",
-                    arrayOf<Any>(serverStatus, uuid)
-                )
-            }
+            db.delete("tx_tags", "tag_id = ?", arrayOf(id.toString()))
+            db.delete("tags", "id = ?", arrayOf(id.toString()))
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
     }
 
-    fun count(status: String): Int =
-        DatabaseUtils.queryNumEntries(readableDatabase, "queue", "status = ?", arrayOf(status)).toInt()
+    /** Gắn [tagId] cho giao dịch [queueId]; null = bỏ tag. */
+    fun setTag(queueId: Long, tagId: Long?) {
+        val db = writableDatabase
+        if (tagId == null) {
+            db.delete("tx_tags", "queue_id = ?", arrayOf(queueId.toString()))
+        } else {
+            db.execSQL("INSERT OR REPLACE INTO tx_tags(queue_id, tag_id) VALUES (?, ?)", arrayOf<Any>(queueId, tagId))
+        }
+    }
 
     fun sources(limit: Int): List<Source> {
         val out = ArrayList<Source>()
@@ -265,8 +343,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     }
 
     companion object {
-        const val PENDING = "pending"
-        const val SYNCED = "synced"
+        private val DEFAULT_TAGS = listOf("Ăn uống", "Đi lại", "Mua sắm", "Hoá đơn", "Nhà cửa", "Lương", "Chuyển khoản", "Khác")
+
+        /** Đủ tương phản trên cả nền sáng và tối. */
+        val TAG_COLORS = listOf(
+            0xFFF97316, 0xFF0EA5E9, 0xFFEC4899, 0xFFEAB308, 0xFF8B5CF6, 0xFF22C55E, 0xFF64748B, 0xFF14B8A6, 0xFFEF4444,
+        ).map { it.toInt() }
 
         @Volatile
         private var instance: Store? = null

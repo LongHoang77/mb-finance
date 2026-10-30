@@ -10,6 +10,9 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -60,8 +63,23 @@ class Ui(private val ctx: Context) {
         if (stroke != null) setStroke(dp(1), stroke)
     }
 
-    fun pressable(color: Int, radius: Int) =
-        RippleDrawable(ColorStateList.valueOf(fg and 0x22FFFFFF), rounded(color, radius), null)
+    fun pressable(color: Int, radius: Int, stroke: Int? = null) =
+        RippleDrawable(ColorStateList.valueOf(fg and 0x22FFFFFF), rounded(color, radius, stroke), null)
+
+    /** Bản nhạt (alpha ~20%) của [color], làm nền cho chip/nhãn. */
+    fun soft(color: Int) = (color and 0x00FFFFFF) or 0x33000000
+
+    /** Nền bottom sheet: chỉ bo 2 góc trên. */
+    fun sheet() = GradientDrawable().apply {
+        setColor(surface)
+        val r = dp(24).toFloat()
+        cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+    }
+
+    /** "● name" với chấm tô màu [color]. */
+    fun dotLabel(name: String, color: Int): CharSequence = SpannableString("● $name").apply {
+        setSpan(ForegroundColorSpan(color), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
 
     fun text(s: CharSequence, size: Float, color: Int = fg, bold: Boolean = false) = TextView(ctx).apply {
         text = s
@@ -105,6 +123,27 @@ class Ui(private val ctx: Context) {
         setOnClickListener { onClick() }
     }
 
+    /** Chip tag: chấm màu + tên, chọn thì nền màu tag nhạt. [color] null = chip thường (vd "+ Tag mới"). */
+    fun tagChip(name: String, color: Int?, selected: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
+        text = if (color == null) name else dotLabel(name, color)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextColor(fg)
+        if (selected) typeface = Typeface.DEFAULT_BOLD
+        val c = color ?: primary
+        background = pressable(if (selected) soft(c) else surface, 20, stroke = if (selected) c else line)
+        setPadding(dp(12), dp(7), dp(12), dp(7))
+        setOnClickListener { onClick() }
+    }
+
+    /** Thanh tỉ lệ ngang, [fraction] trong 0..1. */
+    fun bar(fraction: Float, color: Int) = LinearLayout(ctx).apply {
+        background = rounded(line, 4)
+        addView(View(ctx).apply { background = rounded(color, 4) }, LinearLayout.LayoutParams(0, dp(6), fraction))
+        addView(View(ctx), LinearLayout.LayoutParams(0, dp(6), 1f - fraction))
+    }
+
+    fun flow() = Flow(ctx, dp(8))
+
     fun input(hintText: String) = EditText(ctx).apply {
         hint = hintText
         setSingleLine()
@@ -135,6 +174,46 @@ class Ui(private val ctx: Context) {
     companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    }
+}
+
+/** Xếp view con theo hàng, hết chỗ thì xuống dòng (danh sách tag). */
+@SuppressLint("ViewConstructor")
+class Flow(ctx: Context, private val gap: Int) : ViewGroup(ctx) {
+
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val width = MeasureSpec.getSize(widthSpec)
+        val h = place(width - paddingLeft - paddingRight) { c, _, _ ->
+            measureChild(c, widthSpec, MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+        }
+        setMeasuredDimension(width, h + paddingTop + paddingBottom)
+    }
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        place(r - l - paddingLeft - paddingRight) { c, x, y ->
+            c.layout(paddingLeft + x, paddingTop + y, paddingLeft + x + c.measuredWidth, paddingTop + y + c.measuredHeight)
+        }
+    }
+
+    /** Duyệt con theo thứ tự xếp hàng, gọi [each] (đo hoặc đặt vị trí); trả về tổng chiều cao. */
+    private fun place(maxW: Int, each: (View, Int, Int) -> Unit): Int {
+        var x = 0
+        var y = 0
+        var rowH = 0
+        for (i in 0 until childCount) {
+            val c = getChildAt(i)
+            if (c.visibility == GONE) continue
+            each(c, x, y)
+            if (x > 0 && x + c.measuredWidth > maxW) {
+                x = 0
+                y += rowH + gap
+                rowH = 0
+                each(c, x, y)
+            }
+            x += c.measuredWidth + gap
+            rowH = max(rowH, c.measuredHeight)
+        }
+        return y + rowH
     }
 }
 

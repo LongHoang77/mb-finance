@@ -2,7 +2,7 @@
 
 Đọc file này trước khi đọc code. Hướng dẫn vận hành (deploy, server, token, sao lưu) nằm ở [mb-finance/README.md](mb-finance/README.md) — chỉ mở khi cần.
 
-Dự án cá nhân, 1 người dùng: app Android đọc thông báo MB Bank → gửi nguyên văn lên server → server phân tích thành giao dịch → dashboard web.
+Dự án cá nhân, 1 người dùng: app Android đọc thông báo MB Bank → tự phân tích thành giao dịch, thống kê và gắn tag **hoàn toàn trên máy** (không gửi đi đâu, không có quyền INTERNET). Server + web bên dưới là phần cũ, app không còn gửi dữ liệu lên.
 
 ```
 Android (Kotlin)                Server (Node 22 + TS + Express + SQLite)        Web (React + Vite)
@@ -15,21 +15,20 @@ Toàn bộ code nằm trong `mb-finance/` (không phải gốc repo). Server + w
 
 ## Android — `mb-finance/android/app/src/main/java/vn/mbfinance/tracker/`
 
-Không dùng thư viện ngoài trừ WorkManager. minSdk 26. UI dựng bằng code, không có XML layout.
+Không dùng thư viện ngoài. minSdk 26. UI dựng bằng code, chỉ widget có XML layout.
 
 | File | Vai trò |
 |---|---|
-| `MbNotificationListener.kt` | `NotificationListenerService`. Mọi app: chỉ ghi tên gói + đếm vào bảng `sources` (để chọn package MB). Chỉ package = `Settings.mbPackage` (mặc định `com.mbmobile`) mới được lưu nội dung (lưu hết, lọc khi hiển thị); bỏ qua `FLAG_GROUP_SUMMARY`. `extractText` lấy chuỗi dài nhất trong `bigText` / `text` / `textLines`. Lưu xong gọi `Sync.kick`. `instance` (static) khác null khi listener đang kết nối; `scanActive()` đọc lại thông báo còn trên thanh thông báo (nút "Quét lại thông báo đang hiện" ở tab Cài đặt). |
-| `Store.kt` | SQLite `store.db` (singleton, **DB version 2**, migration viết tay trong `onUpgrade`). Bảng `queue` (thông báo nguyên văn: uuid, package, title ≤500, text ≤4000, posted_at, status `pending`/`synced`, server_status; `UNIQUE(package,text,posted_at)` chống trùng), `transactions` (1-1 với queue qua `queue_id`: amount, direction, balance_after, account, description, `tx_time` e  poch ms, `tx_date` yyyy-MM-dd, `tx_year`/`tx_month`/`tx_day` giờ VN, `time_from_text` = giờ lấy từ nội dung hay giờ máy nhận) và `sources`. `enqueue` ghi queue + transactions trong 1 transaction. Giao dịch giữ mãi; `purgeNonTransactions` xoá thông báo không có trong transactions và không `looksLikeTransaction` (OTP, quảng cáo) sau 7 ngày — gọi trong `Ledger.load`. |
+| `MbNotificationListener.kt` | `NotificationListenerService`. Mọi app: chỉ ghi tên gói + đếm vào bảng `sources` (để chọn package MB). Chỉ package = `Settings.mbPackage` (mặc định `com.mbmobile`) mới được lưu nội dung (lưu hết, lọc khi hiển thị); bỏ qua `FLAG_GROUP_SUMMARY`. `extractText` lấy chuỗi dài nhất trong `bigText` / `text` / `textLines`. Lưu xong gọi `BalanceWidget.refresh`. `instance` (static) khác null khi listener đang kết nối; `scanActive()` đọc lại thông báo còn trên thanh thông báo. `catchUp()` = quét bù (listener đang chạy) hoặc tắt/bật component để ép hệ thống bind lại (ROM hay giết app → listener ngắt, `onNotificationPosted` không được gọi); gọi khi mở app, `onListenerConnected`, widget cập nhật/bấm nút quét. |
+| `Store.kt` | SQLite `store.db` (singleton, **DB version 3**, migration viết tay trong `onUpgrade`). Bảng `queue` (thông báo nguyên văn: uuid, package, title ≤500, text ≤4000, posted_at; `UNIQUE(package,text,posted_at)` chống trùng; cột `status`/`server_status` còn lại từ thời gửi server, không dùng), `transactions` (1-1 với queue qua `queue_id`: amount, direction, balance_after, account, description, `tx_time` epoch ms, `tx_date` yyyy-MM-dd, `tx_year`/`tx_month`/`tx_day` giờ VN, `time_from_text` = giờ lấy từ nội dung hay giờ máy nhận), `sources`, `tags` (name UNIQUE NOCASE, color ARGB; v3 seed sẵn 8 tag) và `tx_tags` (queue_id → tag_id, 1 tag/giao dịch — gắn theo queue_id vì `transactions` bị xoá/điền lại khi reparse). `enqueue` ghi queue + transactions trong 1 transaction. Giao dịch giữ mãi; `purgeNonTransactions` xoá thông báo không có trong transactions và không `looksLikeTransaction` (OTP, quảng cáo) sau 7 ngày. `brief()` = tổng tháng + số dư bằng SQL cho widget. |
 | `Parser.kt` | Bản Kotlin của `server/src/parser.ts` — **sửa regex phải sửa cả 2 bên và tăng `Parser.VERSION`** (app sẽ `reparseAll` lại bảng transactions). |
-| `Ledger.kt` | Đọc `transactions` + thông báo không phân tích được của package MB; tổng theo tháng, số dư gần nhất. `load()` tự `reparseAll` khi `Settings.parserVersion != Parser.VERSION` và dọn thông báo không phải giao dịch quá 7 ngày. Danh sách "chưa đọc được" chỉ gồm thông báo `looksLikeTransaction` (có số tiền kèm dấu +/−). |
-| `Ui.kt` | Bảng màu sáng/tối + hàm dựng view (card, button, chip, input…) và `MonthBars` (biểu đồ cột vẽ bằng Canvas). |
-| `BalanceWidget.kt` | Widget màn hình chính (`res/layout/widget_balance.xml`, `res/xml/widget_balance_info.xml`): thu/chi/chênh lệch tháng này + số dư. Listener gọi `refresh` khi có thông báo mới; hệ thống tự cập nhật mỗi 30 phút. |
-| `Sync.kt` | `Api` (HttpURLConnection, Bearer). `kick()`: OneTimeWork cần mạng, backoff mũ 30s, `APPEND_OR_REPLACE`. `pushAll()`: gửi lô 100 tới `/api/v1/notifications`, đánh dấu `synced` theo `accepted[]`. Lỗi 400/401/413 → `failure` (chờ user sửa); lỗi khác/mạng → `retry`. `schedulePeriodic()`: HeartbeatWorker mỗi 6h (gửi tồn + heartbeat). |
-| `Settings.kt` | SharedPreferences: `serverUrl`, `token` (mã hoá AES-GCM bằng Android Keystore), `mbPackage`, `lastOk` / `lastError`. |
-| `MainActivity.kt` | 3 tab dựng bằng code: **Tổng quan** (chọn tháng, chênh lệch, vào/ra, biểu đồ 6 tháng, chi nhiều nhất, gần đây), **Giao dịch** (lọc vào/ra, nhóm theo ngày, thông báo không đọc được), **Cài đặt** (quyền, URL/token, chọn package MB, đồng bộ, nhật ký). Tick 3s: cập nhật trạng thái, `dataKey` đổi thì load lại `Ledger` ở luồng nền. |
+| `Ledger.kt` | `Tx` (kèm `tag`), `Tag`. Đọc `transactions` + thông báo không phân tích được của package MB; tổng theo tháng, theo tag (`byTag`), số dư gần nhất. `prepare()` tự `reparseAll` khi `Settings.parserVersion != Parser.VERSION` và dọn thông báo không phải giao dịch quá 7 ngày; `load()` gọi `prepare` rồi đọc. Danh sách "chưa đọc được" chỉ gồm thông báo `looksLikeTransaction` (có số tiền kèm dấu +/−). |
+| `Ui.kt` | Bảng màu sáng/tối + hàm dựng view (card, button, chip, `tagChip`, `bar`, `sheet`, input…), `Flow` (xếp chip xuống dòng) và `MonthBars` (biểu đồ cột vẽ bằng Canvas). |
+| `BalanceWidget.kt` | Widget màn hình chính (`res/layout/widget_balance.xml`, `res/xml/widget_balance_info.xml`): thu/chi/chênh lệch tháng này + số dư (`Store.brief`, không load cả Ledger) + trạng thái listener + nút quét lại (`ACTION_SYNC` → `catchUp`). Listener gọi `refresh`; hệ thống tự cập nhật mỗi 30 phút (kèm `catchUp`). |
+| `Settings.kt` | SharedPreferences: `mbPackage`, `parserVersion`, `lastError` (lỗi đọc thông báo). `dropServerConfig()` xoá URL/token + khoá Keystore còn sót từ bản có gửi server. |
+| `MainActivity.kt` | 3 tab dựng bằng code: **Tổng quan** (chọn tháng, chênh lệch, vào/ra, biểu đồ 6 tháng, thu/chi theo tag — chạm để lọc, chi nhiều nhất, gần đây), **Giao dịch** (lọc vào/ra + tag, nhóm theo ngày, thông báo không đọc được), **Cài đặt** (quyền, quản lý tag, chọn package MB, quét lại thông báo, nhật ký). Chạm giao dịch → bottom sheet chi tiết (gắn/bỏ tag, tạo tag mới, thông báo gốc thu gọn). Tick 3s: cập nhật trạng thái, `dataKey` đổi thì load lại `Ledger` ở luồng nền; đổi tag thì `reload()`. |
 
-App tự phân tích để hiển thị thống kê trên máy, đồng thời vẫn gửi nguyên văn lên server (server phân tích riêng cho dashboard web).
+App tự phân tích và lưu mọi thứ trên máy; không còn gửi lên server.
 
 APK build bằng GitHub Actions (`.github/workflows/android.yml`) khi `android/` thay đổi. `android/app/debug.keystore` là khoá ký cố định, cố ý commit vào repo.
 
@@ -64,7 +63,7 @@ API phản hồi `accepted[].status` ∈ `parsed | unparsed | ignored | duplicat
 
 ## Những chỗ dễ sai khi sửa
 
-- Package MB có 2 nơi phải khớp: `Settings.mbPackage` trên app và env `MB_PACKAGES` trong `docker-compose.yml`. Đổi package thì sửa cả hai, rồi chạy `reparse`.
+- Đổi schema app: tăng version trong `Store` và thêm nhánh `if (oldVersion < N)` trong `onUpgrade`, không sửa bảng cũ trong `onCreate` mà quên migration.
 - Sửa parser → sửa cả `parser.ts` và `android/.../Parser.kt`, thêm mẫu vào `parser.test.ts` → deploy → chạy `reparse` trên server (app tự áp dụng khi cài bản mới).
 - Đổi schema server: thêm file `migrations/00X_*.sql` mới, không sửa `001_init.sql`.
 - Giới hạn độ dài phải khớp giữa app và server: title 500, text 4000, tối đa 100 item mỗi lô.

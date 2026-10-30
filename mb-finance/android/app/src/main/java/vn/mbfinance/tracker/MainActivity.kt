@@ -2,20 +2,24 @@ package vn.mbfinance.tracker
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
-import android.text.InputType
+import android.text.SpannableStringBuilder
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
-import android.widget.EditText
+import android.view.Window
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -28,7 +32,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.concurrent.thread
 
-/** 3 tab: Tổng quan, Giao dịch (thống kê tính ngay trên máy) và Cài đặt (quyền, server, đồng bộ). */
+/** 3 tab: Tổng quan, Giao dịch (thống kê tính ngay trên máy) và Cài đặt (quyền, app ngân hàng, quét thông báo). Mọi dữ liệu chỉ nằm trên máy. */
 class MainActivity : Activity() {
 
     private enum class Filter { ALL, IN, OUT }
@@ -48,12 +52,11 @@ class MainActivity : Activity() {
     private lateinit var permButton: View
     private lateinit var batteryText: TextView
     private lateinit var batteryButton: View
-    private lateinit var urlInput: EditText
-    private lateinit var tokenInput: EditText
     private lateinit var pkgText: TextView
     private lateinit var sourcesBox: LinearLayout
-    private lateinit var syncText: TextView
+    private lateinit var scanText: TextView
     private lateinit var recentBox: LinearLayout
+    private lateinit var tagsBox: Flow
     private var lastSourcesKey = ""
     private var lastRecentKey = ""
 
@@ -62,6 +65,10 @@ class MainActivity : Activity() {
     private var loading = false
     private var month: YearMonth = YearMonth.now(Ledger.VN)
     private var filter = Filter.ALL
+    /** Lọc theo tag ở tab Giao dịch: null = mọi tag, [UNTAGGED] = chưa gắn. */
+    private var tagFilter: Long? = null
+    /** Thẻ "Theo tag" ở Tổng quan đang xem tiền vào hay ra. */
+    private var tagIn = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -113,12 +120,14 @@ class MainActivity : Activity() {
         buildSettings()
         renderData()
         selectTab(0)
-        Sync.schedulePeriodic(this)
+        settings.dropServerConfig()
     }
 
     override fun onResume() {
         super.onResume()
         handler.post(ticker)
+        // Mở app = quét bù thông báo bị lỡ khi listener bị hệ thống ngắt
+        thread { runCatching { MbNotificationListener.catchUp(applicationContext) } }
     }
 
     override fun onPause() {
@@ -188,6 +197,12 @@ class MainActivity : Activity() {
         renderTransactions()
     }
 
+    /** Đổi tag không làm đổi dataKey → ép đọc lại sổ. */
+    private fun reload() {
+        ledgerKey = ""
+        render()
+    }
+
     // ------------------------------------------------------------------ tab Tổng quan
 
     private fun renderOverview() {
@@ -223,6 +238,8 @@ class MainActivity : Activity() {
         )
         ui.add(box, chart)
 
+        ui.add(box, tagBreakdown())
+
         val top = ledger.inMonth(month).filter { !it.isIn }.sortedByDescending { it.amount }.take(5)
         if (top.isNotEmpty()) {
             val c = ui.card()
@@ -243,6 +260,46 @@ class MainActivity : Activity() {
             ui.add(recent, ui.button("Xem tất cả giao dịch", filled = false) { selectTab(1) }, 8)
         }
         ui.add(box, recent)
+    }
+
+    /** Tổng thu/chi tháng theo tag; chạm 1 dòng để xem các giao dịch của tag đó. */
+    private fun tagBreakdown(): View {
+        val c = ui.card()
+        val side = LinearLayout(this).apply {
+            addView(ui.tagChip("Chi", null, !tagIn) { tagIn = false; renderOverview() })
+            addView(
+                ui.tagChip("Thu", null, tagIn) { tagIn = true; renderOverview() },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(6) },
+            )
+        }
+        c.addView(ui.split(ui.text("Theo tag", 15f, bold = true), side))
+        val rows = ledger.byTag(month, tagIn)
+        if (rows.isEmpty()) {
+            ui.add(c, ui.text("Không có giao dịch ${if (tagIn) "vào" else "ra"} trong tháng này.", 14f, ui.muted), 8)
+            return c
+        }
+        val total = rows.sumOf { it.second }.coerceAtLeast(1)
+        for ((tag, amount) in rows) {
+            val color = tag?.color ?: ui.muted
+            val pct = amount * 100 / total
+            val row = ui.vbox().apply {
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+                background = ui.pressable(ui.surface, 8)
+                addView(ui.split(
+                    ui.text(ui.dotLabel(tag?.name ?: "Chưa gắn tag", color), 14f),
+                    ui.text("${ui.money(amount)} · $pct%", 13f, ui.muted),
+                ))
+                ui.add(this, ui.bar(amount.toFloat() / total, color), 6)
+                setOnClickListener {
+                    tagFilter = tag?.id ?: UNTAGGED
+                    filter = if (tagIn) Filter.IN else Filter.OUT
+                    renderTransactions()
+                    selectTab(1)
+                }
+            }
+            ui.add(c, row, 4)
+        }
+        return c
     }
 
     private fun kpi(label: String, amount: Long, count: Int, color: Int) = ui.card().apply {
@@ -300,8 +357,10 @@ class MainActivity : Activity() {
             ellipsize = TextUtils.TruncateAt.END
         })
         // Thông báo không ghi giờ giao dịch → đang dùng giờ máy nhận, ghi chú để phân biệt
-        val time = fmt.format(Instant.ofEpochMilli(t.time)) + if (t.timeFromText) "" else " · giờ nhận thông báo"
-        left.addView(ui.text(time, 12f, ui.muted))
+        val meta = SpannableStringBuilder(fmt.format(Instant.ofEpochMilli(t.time)))
+        if (!t.timeFromText) meta.append(" · giờ nhận thông báo")
+        t.tag?.let { meta.append("   ").append(ui.dotLabel(it.name, it.color)) }
+        left.addView(ui.text(meta, 12f, ui.muted))
         val amount = ui.text(
             ui.money(if (t.isIn) t.amount else -t.amount, signed = true),
             15f, if (t.isIn) ui.green else ui.red, bold = true,
@@ -313,41 +372,125 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Hộp thoại chi tiết 1 giao dịch, kèm nguyên văn thông báo MB. */
+    /** Chi tiết 1 giao dịch dạng bottom sheet: số tiền, tag (chạm để gắn/bỏ), thông tin và thông báo gốc. */
     private fun showTx(t: Tx) {
-        val box = ui.vbox().apply { setPadding(dp(20), dp(8), dp(20), dp(8)) }
-        box.addView(ui.text(
-            ui.money(if (t.isIn) t.amount else -t.amount, signed = true),
-            26f, if (t.isIn) ui.green else ui.red, bold = true,
-        ))
-        box.addView(ui.text(if (t.isIn) "Tiền vào" else "Tiền ra", 13f, ui.muted))
-
-        fun field(label: String, value: String) {
-            ui.add(box, ui.text(label, 12f, ui.muted), 14)
-            box.addView(ui.text(value, 15f).apply { setTextIsSelectable(true) })
+        val dialog = Dialog(this)
+        val color = if (t.isIn) ui.green else ui.red
+        val box = ui.vbox().apply {
+            background = ui.sheet()
+            setPadding(dp(20), dp(10), dp(20), dp(20))
         }
-        field("Ngày giao dịch", dayFmt.format(t.date).replaceFirstChar { it.uppercase() })
-        field(
-            "Giờ",
-            clockFmt.format(Instant.ofEpochMilli(t.time)) +
-                if (t.timeFromText) "" else " (thông báo không ghi giờ — đây là giờ máy nhận)",
+        fun addWrap(v: View, gap: Int) = box.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(gap) })
+
+        box.addView(View(this).apply { background = ui.rounded(ui.line, 3) }, LinearLayout.LayoutParams(dp(40), dp(5)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
+        addWrap(ui.text(if (t.isIn) "Tiền vào" else "Tiền ra", 12f, color, bold = true).apply {
+            background = ui.rounded(ui.soft(color), 20)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }, 14)
+        ui.add(box, ui.text(ui.money(if (t.isIn) t.amount else -t.amount, signed = true), 32f, color, bold = true), 6)
+        ui.add(box, ui.text(t.description ?: "(không có nội dung)", 16f).apply { setTextIsSelectable(true) }, 4)
+        val day = dayFmt.format(t.date).replaceFirstChar { it.uppercase() }
+        val clock = clockFmt.format(Instant.ofEpochMilli(t.time)) + if (t.timeFromText) "" else " (giờ nhận thông báo)"
+        ui.add(box, ui.text("$day · $clock", 13f, ui.muted), 4)
+
+        // Tag: chạm để gắn, chạm lại tag đang chọn để bỏ
+        ui.add(box, ui.text("TAG", 12f, ui.muted, bold = true), 20)
+        val tagFlow = ui.flow().also { ui.add(box, it, 8) }
+        var current = t.tag?.id
+        var changed = false
+        fun pick(id: Long?) {
+            current = id
+            store.setTag(t.id, id)
+            changed = true
+        }
+        fun fillTags() {
+            tagFlow.removeAllViews()
+            for (g in store.tags()) {
+                tagFlow.addView(ui.tagChip(g.name, g.color, g.id == current) {
+                    pick(if (current == g.id) null else g.id)
+                    fillTags()
+                })
+            }
+            tagFlow.addView(ui.tagChip("+ Tag mới", null, false) {
+                askTagName("Tag mới", "") { name ->
+                    val g = store.addTag(name)
+                    if (g == null) toast("Đã có tag \"$name\"") else pick(g.id)
+                    renderTagSettings()
+                    fillTags()
+                }
+            })
+        }
+        fillTags()
+
+        val info = listOfNotNull(
+            t.balanceAfter?.let { "Số dư sau giao dịch" to ui.money(it) },
+            t.account?.let { "Tài khoản" to it },
         )
-        field("Nội dung", t.description ?: "(không có)")
-        t.balanceAfter?.let { field("Số dư sau giao dịch", ui.money(it)) }
-        t.account?.let { field("Tài khoản", it) }
+        if (info.isNotEmpty()) {
+            val card = ui.card(radius = 14, color = ui.bg)
+            info.forEachIndexed { i, (label, value) ->
+                if (i > 0) card.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1).apply { topMargin = dp(10) })
+                card.addView(ui.split(
+                    ui.text(label, 13f, ui.muted),
+                    ui.text(value, 14f, bold = true).apply { setTextIsSelectable(true) },
+                ).apply { setPadding(0, if (i > 0) dp(10) else 0, 0, 0) })
+            }
+            ui.add(box, card, 20)
+        }
+
         store.text(t.id)?.let { raw ->
-            ui.add(box, ui.text("Thông báo gốc", 12f, ui.muted), 14)
-            ui.add(box, ui.text(raw, 13f).apply {
+            val rawText = ui.text(raw, 13f).apply {
                 setTextIsSelectable(true)
                 background = ui.rounded(ui.bg, 10)
-                setPadding(dp(10), dp(8), dp(10), dp(8))
-            }, 4)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                visibility = View.GONE
+            }
+            val toggle = ui.text("Xem thông báo gốc ▾", 13f, ui.primary, bold = true).apply {
+                setPadding(0, dp(6), 0, dp(6))
+                setOnClickListener {
+                    val show = rawText.visibility != View.VISIBLE
+                    rawText.visibility = if (show) View.VISIBLE else View.GONE
+                    text = if (show) "Ẩn thông báo gốc ▴" else "Xem thông báo gốc ▾"
+                }
+            }
+            addWrap(toggle, 14)
+            ui.add(box, rawText, 4)
         }
 
+        ui.add(box, ui.button("Xong") { dialog.dismiss() }, 20)
+
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(ScrollView(this).apply { addView(box) })
+        dialog.setOnDismissListener { if (changed) reload() }
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(MATCH, WRAP)
+            setGravity(Gravity.BOTTOM)
+            setWindowAnimations(android.R.style.Animation_InputMethod)
+        }
+    }
+
+    /** Hỏi tên tag (≤ 30 ký tự, không rỗng). */
+    private fun askTagName(title: String, initial: String, onOk: (String) -> Unit) {
+        val input = ui.input("Tên tag, vd: Ăn uống").apply {
+            setText(initial)
+            setSelection(initial.length)
+        }
+        val wrap = FrameLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(input)
+        }
         AlertDialog.Builder(this)
-            .setTitle("Chi tiết giao dịch")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("Đóng", null)
+            .setTitle(title)
+            .setView(wrap)
+            .setPositiveButton("Lưu") { _, _ ->
+                val name = input.text.toString().trim().take(30)
+                if (name.isNotEmpty()) onOk(name)
+            }
+            .setNegativeButton("Huỷ", null)
             .show()
     }
 
@@ -367,15 +510,36 @@ class MainActivity : Activity() {
         }
         ui.add(box, chips, 8)
 
+        val tags = store.tags()
+        if (tagFilter != null && tagFilter != UNTAGGED && tags.none { it.id == tagFilter }) tagFilter = null
+        val tagRow = LinearLayout(this)
+        fun tagOption(label: String, color: Int?, id: Long?) = tagRow.addView(
+            ui.tagChip(label, color, tagFilter == id) { tagFilter = id; renderTransactions() },
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { if (tagRow.childCount > 0) marginStart = dp(6) },
+        )
+        tagOption("Mọi tag", null, null)
+        tagOption("Chưa gắn", null, UNTAGGED)
+        for (g in tags) tagOption(g.name, g.color, g.id)
+        ui.add(box, HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(tagRow)
+        }, 8)
+
         val list = ledger.inMonth(month).filter {
-            when (filter) {
+            val dirOk = when (filter) {
                 Filter.ALL -> true
                 Filter.IN -> it.isIn
                 Filter.OUT -> !it.isIn
             }
+            val tagOk = when (tagFilter) {
+                null -> true
+                UNTAGGED -> it.tag == null
+                else -> it.tag?.id == tagFilter
+            }
+            dirOk && tagOk
         }
         if (list.isEmpty()) {
-            ui.add(box, ui.card().apply { addView(ui.text("Không có giao dịch trong tháng này.", 14f, ui.muted)) })
+            ui.add(box, ui.card().apply { addView(ui.text("Không có giao dịch phù hợp trong tháng này.", 14f, ui.muted)) })
         }
         for ((day, items) in list.groupBy { it.date }) {
             val net = items.sumOf { if (it.isIn) it.amount else -it.amount }
@@ -429,20 +593,10 @@ class MainActivity : Activity() {
             12f, ui.muted,
         ), 10)
 
-        val srv = section("SERVER")
-        urlInput = ui.input("https://mb-finance.xxxx.ts.net").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setText(settings.serverUrl)
-        }
-        srv.addView(urlInput)
-        tokenInput = ui.input(if (settings.hasToken) "Token đã lưu (nhập để thay)" else "Token từ lệnh device:add").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        ui.add(srv, tokenInput, 8)
-        ui.add(srv, ui.row(
-            ui.button("Lưu") { save() },
-            ui.button("Thử kết nối", filled = false) { testConnection() },
-        ), 10)
+        val tagSec = section("TAG THU CHI")
+        tagSec.addView(ui.text("Gắn tag trong màn chi tiết giao dịch. Chạm tag ở đây để đổi tên hoặc xoá.", 12f, ui.muted))
+        tagsBox = ui.flow().also { ui.add(tagSec, it, 10) }
+        renderTagSettings()
 
         val bank = section("APP NGÂN HÀNG")
         pkgText = ui.text("", 14f).also { bank.addView(it) }
@@ -452,39 +606,36 @@ class MainActivity : Activity() {
         ), 6)
         sourcesBox = ui.vbox().also { ui.add(bank, it, 6) }
 
-        val sync = section("ĐỒNG BỘ")
-        syncText = ui.text("", 14f).also { sync.addView(it) }
-        ui.add(sync, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
-        ui.add(sync, ui.row(
-            ui.button("Gửi ngay") {
-                Sync.kick(this)
-                toast("Đã yêu cầu gửi")
-            },
-            ui.button("Mở dashboard", filled = false) { openDashboard() },
-        ), 10)
+        val scan = section("QUÉT THÔNG BÁO")
+        scanText = ui.text("", 14f).also { scan.addView(it) }
+        ui.add(scan, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
 
         val log = section("THÔNG BÁO MB ĐÃ BẮT")
         recentBox = ui.vbox().also { log.addView(it) }
     }
 
     private fun renderStatus() {
-        val listenerOn = AndroidSettings.Secure.getString(contentResolver, "enabled_notification_listeners")
-            ?.contains(packageName) == true
-        permText.text = if (listenerOn) "✅ Đã cấp quyền đọc thông báo" else "❌ Chưa cấp quyền đọc thông báo"
-        permButton.visibility = if (listenerOn) View.GONE else View.VISIBLE
+        val listenerOn = MbNotificationListener.isEnabled(this)
+        val connected = MbNotificationListener.instance != null
+        permText.text = when {
+            !listenerOn -> "❌ Chưa cấp quyền đọc thông báo"
+            !connected -> "⚠️ Đã cấp quyền nhưng dịch vụ đọc thông báo chưa chạy — đang thử kết nối lại. " +
+                "Nếu kéo dài: tắt rồi bật lại quyền."
+            else -> "✅ Đang nhận thông báo"
+        }
+        permButton.visibility = if (listenerOn && connected) View.GONE else View.VISIBLE
 
         val pm = getSystemService(PowerManager::class.java)
         val unrestricted = pm?.isIgnoringBatteryOptimizations(packageName) == true
         batteryText.text = if (unrestricted) "✅ Được chạy nền không giới hạn" else "⚠️ Hệ thống có thể tắt app để tiết kiệm pin"
         batteryButton.visibility = if (unrestricted) View.GONE else View.VISIBLE
 
-        val pending = store.count(Store.PENDING)
         headerStatus.text = when {
             !listenerOn -> "⚠ Chưa cấp quyền đọc thông báo — vào tab Cài đặt"
-            settings.lastError != null -> "⚠ Chưa gửi được lên server — xem tab Cài đặt"
-            else -> "Đang theo dõi ${label(settings.mbPackage)}" + if (pending > 0) " · $pending chờ gửi" else ""
+            !connected -> "⚠ Dịch vụ đọc thông báo chưa chạy — xem tab Cài đặt"
+            else -> "Đang theo dõi ${label(settings.mbPackage)}"
         }
-        headerStatus.setTextColor(if (!listenerOn || settings.lastError != null) ui.warn else ui.muted)
+        headerStatus.setTextColor(if (!listenerOn || !connected) ui.warn else ui.muted)
 
         pkgText.text = "Đang theo dõi: ${label(settings.mbPackage)} (${settings.mbPackage})"
 
@@ -507,26 +658,20 @@ class MainActivity : Activity() {
             }
         }
 
-        val sb = StringBuilder()
-        sb.append("Chờ gửi: $pending · Đã gửi: ${store.count(Store.SYNCED)}\n")
-        sb.append("Gửi thành công lần cuối: ${if (settings.lastOkAt > 0) fmt(settings.lastOkAt) else "chưa có"}")
-        settings.lastError?.let { sb.append("\n⚠️ $it (${fmt(settings.lastErrorAt)})") }
-        syncText.text = sb.toString()
+        scanText.text = "Đã lưu ${ledger.txs.size} giao dịch trên máy" +
+            (settings.lastError?.let { "\n⚠️ $it (${fmt(settings.lastErrorAt)})" } ?: "")
 
         val recent = store.recent(15)
-        val rKey = recent.joinToString { "${it.id}:${it.status}" }
+        val rKey = recent.joinToString { "${it.id}" }
         if (rKey != lastRecentKey) {
             lastRecentKey = rKey
             recentBox.removeAllViews()
             if (recent.isEmpty()) recentBox.addView(ui.text("Chưa có. Thông báo từ app đang theo dõi sẽ hiện ở đây.", 13f, ui.muted))
             recent.forEachIndexed { i, it ->
                 val state = when {
-                    it.status == Store.PENDING -> "⏳ chờ gửi"
-                    it.serverStatus == "parsed" -> "✅ đã ghi nhận"
-                    it.serverStatus == "duplicate" -> "✅ đã có trên server"
-                    it.serverStatus == "unparsed" -> "❔ server chưa đọc được"
-                    it.serverStatus == "ignored" -> "⛔ server bỏ qua (sai package?)"
-                    else -> "✅ đã gửi"
+                    Parser.parse(it.text) != null -> "✅ giao dịch"
+                    Parser.looksLikeTransaction(it.text) -> "❔ giống giao dịch nhưng chưa đọc được"
+                    else -> "không phải giao dịch"
                 }
                 if (i > 0) ui.add(recentBox, ui.divider().apply { minimumHeight = 1 }, 10)
                 ui.add(recentBox, ui.text("${fmt(it.postedAt)} · $state", 12f, ui.muted), if (i > 0) 10 else 0)
@@ -540,31 +685,49 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ hành động
 
-    private fun save() {
-        val url = urlInput.text.toString().trim().trimEnd('/')
-        if (!url.startsWith("https://")) {
-            toast("Địa chỉ phải bắt đầu bằng https://")
-            return
-        }
-        settings.serverUrl = url
-        val tok = tokenInput.text.toString().trim()
-        if (tok.isNotEmpty()) {
-            settings.token = tok
-            tokenInput.setText("")
-            tokenInput.hint = "Token đã lưu (nhập để thay)"
-        }
-        if (!settings.hasToken) {
-            toast("Chưa có token")
-            return
-        }
-        toast("Đã lưu")
-        Sync.schedulePeriodic(this)
-        Sync.kick(this)
+    private fun renderTagSettings() {
+        tagsBox.removeAllViews()
+        for (g in store.tags()) tagsBox.addView(ui.tagChip(g.name, g.color, false) { manageTag(g) })
+        tagsBox.addView(ui.tagChip("+ Thêm tag", null, false) {
+            askTagName("Tag mới", "") { name ->
+                if (store.addTag(name) == null) toast("Đã có tag \"$name\"")
+                renderTagSettings()
+                reload()
+            }
+        })
     }
+
+    private fun manageTag(g: Tag) {
+        AlertDialog.Builder(this)
+            .setTitle(g.name)
+            .setItems(arrayOf("Đổi tên", "Xoá tag")) { _, which ->
+                if (which == 0) {
+                    askTagName("Đổi tên tag", g.name) { name ->
+                        if (!store.renameTag(g.id, name)) toast("Đã có tag \"$name\"")
+                        renderTagSettings()
+                        reload()
+                    }
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("Xoá tag ${g.name}?")
+                        .setMessage("Các giao dịch đang gắn tag này sẽ trở về \"chưa gắn tag\".")
+                        .setPositiveButton("Xoá") { _, _ ->
+                            store.deleteTag(g.id)
+                            renderTagSettings()
+                            reload()
+                        }
+                        .setNegativeButton("Huỷ", null)
+                        .show()
+                }
+            }
+            .show()
+    }
+
 
     private fun scanNotifications() {
         val listener = MbNotificationListener.instance
         if (listener == null) {
+            thread { MbNotificationListener.catchUp(applicationContext) }
             AlertDialog.Builder(this)
                 .setTitle("Dịch vụ đọc thông báo không chạy")
                 .setMessage(
@@ -598,30 +761,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun testConnection() {
-        toast("Đang thử…")
-        thread {
-            val err = Sync.heartbeat(applicationContext)
-            runOnUiThread {
-                if (err == null) {
-                    toast("✅ Kết nối thành công")
-                    Sync.kick(this)
-                } else {
-                    AlertDialog.Builder(this).setTitle("Không kết nối được").setMessage(err)
-                        .setPositiveButton("OK", null).show()
-                }
-                render()
-            }
-        }
-    }
-
     private fun choosePackage(pkg: String) {
         if (pkg == settings.mbPackage) return
         AlertDialog.Builder(this)
             .setTitle("Theo dõi ${label(pkg)}?")
             .setMessage(
-                "Từ giờ app sẽ lưu và gửi lên server toàn bộ nội dung thông báo của:\n$pkg\n\n" +
-                    "Chỉ chọn app ngân hàng MB. Nhớ đặt MB_PACKAGES=$pkg trong docker-compose.yml trên server."
+                "Từ giờ app sẽ lưu (trên máy) toàn bộ nội dung thông báo của:\n$pkg\n\n" +
+                    "Chỉ chọn app ngân hàng MB."
             )
             .setPositiveButton("Chọn") { _, _ ->
                 settings.mbPackage = pkg
@@ -642,19 +788,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun openDashboard() {
-        val url = settings.serverUrl
-        if (url.isBlank()) {
-            toast("Chưa nhập địa chỉ server")
-            return
-        }
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-        } catch (e: Exception) {
-            toast("Không mở được trình duyệt")
-        }
-    }
-
     // ------------------------------------------------------------------ tiện ích
 
     private fun label(pkg: String): String = try {
@@ -668,4 +801,8 @@ class MainActivity : Activity() {
     private fun dp(v: Int) = ui.dp(v)
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    companion object {
+        private const val UNTAGGED = -1L
+    }
 }

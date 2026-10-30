@@ -2,13 +2,17 @@ package vn.mbfinance.tracker
 
 import android.app.Notification
 import android.content.ComponentName
+import android.content.Context
+import android.content.pm.PackageManager
+import android.provider.Settings as AndroidSettings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import kotlin.concurrent.thread
 
 /**
  * Hệ thống gọi service này mỗi khi có thông báo mới (không cần chạy nền liên tục).
  * - Mọi app: chỉ đếm tên gói (để tìm đúng package MB Bank), KHÔNG lưu nội dung.
- * - App MB Bank đã chọn: lưu toàn bộ nội dung vào hàng đợi rồi kích hoạt gửi
+ * - App MB Bank đã chọn: lưu toàn bộ nội dung trên máy rồi cập nhật widget
  *   (thông báo không phải giao dịch tự xoá sau 7 ngày, xem Store.purgeNonTransactions).
  */
 class MbNotificationListener : NotificationListenerService() {
@@ -28,10 +32,7 @@ class MbNotificationListener : NotificationListenerService() {
 
         Store.get(this).recordSource(pkg, System.currentTimeMillis())
 
-        if (save(sbn)) {
-            Sync.kick(this)
-            BalanceWidget.refresh(this)
-        }
+        if (save(sbn)) saved(this)
     }
 
     /** Lưu nếu là thông báo của app MB đã chọn. false nếu bỏ qua hoặc đã có. */
@@ -47,7 +48,7 @@ class MbNotificationListener : NotificationListenerService() {
         return Store.get(this).enqueue(pkg, title, text, sbn.postTime)
     }
 
-    /** Đọc lại thông báo MB còn trên thanh thông báo (nút "Quét lại"). Trả về số bản mới lưu. */
+    /** Đọc lại thông báo MB còn trên thanh thông báo. Trả về số bản mới lưu. */
     fun scanActive(): Int {
         var added = 0
         for (sbn in activeNotifications.orEmpty()) {
@@ -57,22 +58,24 @@ class MbNotificationListener : NotificationListenerService() {
                 Settings(this).markError("Lỗi đọc thông báo: ${e.javaClass.simpleName}")
             }
         }
-        if (added > 0) {
-            Sync.kick(this)
-            BalanceWidget.refresh(this)
-        }
+        if (added > 0) saved(this)
         return added
     }
 
     override fun onListenerConnected() {
         instance = this
-        Sync.schedulePeriodic(this)
+        // Thông báo đến lúc listener bị ngắt (app bị hệ thống giết) không được gọi onNotificationPosted → quét bù
+        thread {
+            runCatching { scanActive() }
+            BalanceWidget.refresh(this)
+        }
     }
 
     override fun onListenerDisconnected() {
         instance = null
+        BalanceWidget.refresh(this)
         // Xin hệ thống kết nối lại khi bị ngắt (vd sau khi app được cập nhật)
-        NotificationListenerService.requestRebind(ComponentName(this, MbNotificationListener::class.java))
+        requestRebind(ComponentName(this, MbNotificationListener::class.java))
     }
 
     override fun onDestroy() {
@@ -85,6 +88,42 @@ class MbNotificationListener : NotificationListenerService() {
         @Volatile
         var instance: MbNotificationListener? = null
             private set
+
+        @Volatile
+        private var lastRebindAt = 0L
+
+        private fun saved(ctx: Context) = BalanceWidget.refresh(ctx)
+
+        /** Đã cấp quyền "Truy cập thông báo" (chưa chắc dịch vụ đang chạy, xem [instance]). */
+        fun isEnabled(ctx: Context): Boolean =
+            AndroidSettings.Secure.getString(ctx.contentResolver, "enabled_notification_listeners")
+                ?.contains(ctx.packageName) == true
+
+        /**
+         * Bù thông báo bị lỡ: listener đang chạy thì quét thanh thông báo, không thì ép hệ thống kết nối lại
+         * (onListenerConnected sẽ tự quét). Trả về số bản mới lưu, -1 nếu listener chưa chạy.
+         */
+        fun catchUp(ctx: Context): Int {
+            instance?.let { return it.scanActive() }
+            rebind(ctx)
+            return -1
+        }
+
+        /** Tắt/bật lại component để hệ thống bind lại listener (requestRebind một mình hay bị bỏ qua trên ROM tuỳ biến). */
+        private fun rebind(ctx: Context) {
+            val now = System.currentTimeMillis()
+            if (!isEnabled(ctx) || now - lastRebindAt < 60_000) return
+            lastRebindAt = now
+            val cn = ComponentName(ctx, MbNotificationListener::class.java)
+            try {
+                val pm = ctx.packageManager
+                pm.setComponentEnabledSetting(cn, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+                pm.setComponentEnabledSetting(cn, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
+                requestRebind(cn)
+            } catch (e: Exception) {
+                // Không ép được thì chờ hệ thống tự kết nối
+            }
+        }
 
         /** Lấy phần nội dung dài nhất: text ngắn thường bị cắt, bigText/textLines mới đầy đủ. */
         fun extractText(n: Notification): String? {

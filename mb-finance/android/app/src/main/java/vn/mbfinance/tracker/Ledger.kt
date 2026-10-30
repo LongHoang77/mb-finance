@@ -17,7 +17,11 @@ data class Tx(
     val time: Long,
     val date: LocalDate,
     val timeFromText: Boolean,
+    val tag: Tag?,
 )
+
+/** Tag thu chi do người dùng tự đặt; [color] là ARGB. */
+data class Tag(val id: Long, val name: String, val color: Int)
 
 /** Sổ giao dịch đọc từ bảng transactions trên máy (không cần server). */
 class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
@@ -44,6 +48,13 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
         return MonthSum(m, ins.sumOf { it.amount }, outs.sumOf { it.amount }, ins.size, outs.size)
     }
 
+    /** Tổng tiền vào ([isIn]) hoặc ra theo tag trong tháng, lớn nhất trước; tag null = chưa gắn. */
+    fun byTag(m: YearMonth, isIn: Boolean): List<Pair<Tag?, Long>> =
+        inMonth(m).filter { it.isIn == isIn }
+            .groupBy { it.tag }
+            .map { (tag, list) -> tag to list.sumOf { it.amount } }
+            .sortedByDescending { it.second }
+
     /** [n] tháng liên tiếp, kết thúc ở [end]. */
     fun lastMonths(end: YearMonth, n: Int) = (n - 1 downTo 0).map { sum(end.minusMonths(it.toLong())) }
 
@@ -57,7 +68,7 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
         fun monthOf(ms: Long): YearMonth = YearMonth.from(Instant.ofEpochMilli(ms).atZone(VN))
 
         /** Trước khi đọc: phân tích lại nếu Parser đổi phiên bản, xoá thông báo không phải giao dịch quá 7 ngày. */
-        fun load(ctx: Context): Ledger {
+        fun prepare(ctx: Context) {
             val store = Store.get(ctx)
             val settings = Settings(ctx)
             synchronized(this) {
@@ -67,7 +78,12 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
                 }
                 store.purgeNonTransactions(System.currentTimeMillis() - KEEP_OTHER_MS)
             }
-            val pkg = settings.mbPackage
+        }
+
+        fun load(ctx: Context): Ledger {
+            prepare(ctx)
+            val store = Store.get(ctx)
+            val pkg = Settings(ctx).mbPackage
             // Bỏ OTP/quảng cáo đã lưu từ bản cũ, chỉ giữ mẫu giao dịch parser chưa đọc được
             return Ledger(store.transactions(pkg), store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) })
         }

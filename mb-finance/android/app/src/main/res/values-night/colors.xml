@@ -5,4 +5,9 @@
     <color name="w_muted">#9AA0A6</color>
     <color name="w_green">#4ADE80</color>
     <color name="w_red">#F87171</color>
+    <color name="w_warn">#FCD34D</color>
+    <color name="w_green_soft">#264ADE80</color>
+    <color name="w_red_soft">#26F87171</color>
+    <color name="w_btn">#1FE8EAED</color>
+    <color name="w_ripple">#33E8EAED</color>
 </resources>

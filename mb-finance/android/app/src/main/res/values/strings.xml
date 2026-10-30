@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="widget_desc">Thu, chi và số dư tháng này</string>
+    <string name="widget_sync">Quét lại thông báo</string>
 </resources>
