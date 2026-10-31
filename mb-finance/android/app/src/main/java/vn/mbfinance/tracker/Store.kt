@@ -15,7 +15,7 @@ import java.util.UUID
  * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
  * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 3) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 4) {
 
     data class Item(
         val id: Long,
@@ -61,6 +61,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         if (oldVersion < 2) createTransactions(db)
         // v3: tag thu chi (cột status/server_status của queue từ thời gửi server giờ bỏ không dùng)
         if (oldVersion < 3) createTags(db)
+        // v4: xoá giao dịch trùng đã lưu từ bản chưa có kiểm tra trùng
+        if (oldVersion < 4) dropDuplicates(db)
     }
 
     /** Tag gắn theo queue_id (không theo bảng transactions vì bảng đó bị xoá/điền lại khi reparse). */
@@ -104,21 +106,27 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.execSQL("UPDATE sources SET count = count + 1, last_seen = ? WHERE package = ?", arrayOf<Any>(now, pkg))
     }
 
-    /** Lưu thông báo + giao dịch phân tích được. Trả về false nếu đã có (cùng app + nội dung + thời điểm). */
+    /**
+     * Lưu thông báo + giao dịch phân tích được. Trả về false nếu đã có: cùng app + nội dung + thời điểm,
+     * hoặc trùng một giao dịch đã lưu (xem [isDuplicate]).
+     */
     fun enqueue(pkg: String, title: String?, text: String, postedAt: Long): Boolean {
+        val body = text.take(4000)
         val cv = ContentValues().apply {
             put("uuid", UUID.randomUUID().toString())
             put("package", pkg)
             put("title", title?.take(500))
-            put("text", text.take(4000))
+            put("text", body)
             put("posted_at", postedAt)
         }
+        val p = Parser.parse(body)
         val db = writableDatabase
         db.beginTransaction()
         try {
+            if (p != null && isDuplicate(db, p)) return false
             val id = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
             if (id == -1L) return false
-            saveParsed(db, id, text.take(4000), postedAt)
+            if (p != null) saveParsed(db, id, p, postedAt)
             db.setTransactionSuccessful()
             return true
         } finally {
@@ -126,8 +134,55 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         }
     }
 
-    private fun saveParsed(db: SQLiteDatabase, queueId: Long, text: String, postedAt: Long) {
-        val p = Parser.parse(text) ?: return
+    /**
+     * MB gửi lại / cập nhật thông báo → postTime hoặc text khác nhưng vẫn là 1 giao dịch.
+     * Coi là trùng khi khớp TK, chiều, số tiền, số dư sau, nội dung và giờ GHI TRONG thông báo;
+     * thiếu số dư hoặc giờ thì không đủ chắc → không coi là trùng.
+     */
+    private fun isDuplicate(db: SQLiteDatabase, p: Parser.Parsed): Boolean {
+        val time = p.time ?: return false
+        val balance = p.balanceAfter ?: return false
+        return db.rawQuery(
+            """
+            SELECT 1 FROM transactions
+            WHERE time_from_text = 1 AND tx_time = ? AND amount = ? AND direction = ?
+              AND balance_after = ? AND COALESCE(account, '') = ? AND COALESCE(description, '') = ?
+            LIMIT 1
+            """.trimIndent(),
+            // rawQuery không nhận tham số null → so sánh qua COALESCE
+            arrayOf(
+                time.toString(), p.amount.toString(), if (p.isIn) "in" else "out", balance.toString(),
+                p.account.orEmpty(), p.description.orEmpty(),
+            ),
+        ).use { it.moveToFirst() }
+    }
+
+    /** Xoá thông báo trùng giao dịch đã có (giữ bản lưu trước); tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag. */
+    private fun dropDuplicates(db: SQLiteDatabase) {
+        val pairs = ArrayList<Pair<Long, Long>>() // bản trùng → bản giữ lại
+        db.rawQuery(
+            """
+            SELECT d.queue_id, MIN(k.queue_id) FROM transactions d JOIN transactions k
+              ON k.queue_id < d.queue_id AND k.time_from_text = 1 AND d.time_from_text = 1
+             AND k.tx_time = d.tx_time AND k.amount = d.amount AND k.direction = d.direction
+             AND k.balance_after = d.balance_after AND k.account IS d.account AND k.description IS d.description
+            GROUP BY d.queue_id
+            """.trimIndent(),
+            null,
+        ).use { c -> while (c.moveToNext()) pairs.add(c.getLong(0) to c.getLong(1)) }
+        for ((dup, keep) in pairs) {
+            val args = arrayOf(dup.toString())
+            db.execSQL(
+                "INSERT OR IGNORE INTO tx_tags(queue_id, tag_id) SELECT ?, tag_id FROM tx_tags WHERE queue_id = ?",
+                arrayOf<Any>(keep, dup),
+            )
+            db.delete("tx_tags", "queue_id = ?", args)
+            db.delete("transactions", "queue_id = ?", args)
+            db.delete("queue", "id = ?", args)
+        }
+    }
+
+    private fun saveParsed(db: SQLiteDatabase, queueId: Long, p: Parser.Parsed, postedAt: Long) {
         val time = p.time ?: postedAt
         val d = Instant.ofEpochMilli(time).atZone(Ledger.VN).toLocalDate()
         val cv = ContentValues().apply {
@@ -155,8 +210,9 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         try {
             db.delete("transactions", null, null)
             db.rawQuery("SELECT id, text, posted_at FROM queue", null).use { c ->
-                while (c.moveToNext()) saveParsed(db, c.getLong(0), c.getString(1), c.getLong(2))
+                while (c.moveToNext()) Parser.parse(c.getString(1))?.let { saveParsed(db, c.getLong(0), it, c.getLong(2)) }
             }
+            dropDuplicates(db)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
