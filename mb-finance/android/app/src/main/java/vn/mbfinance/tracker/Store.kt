@@ -23,6 +23,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val title: String?,
         val text: String,
         val postedAt: Long,
+        val deleted: Boolean = false, // người dùng đã xoá giao dịch này (xem [deleteTransaction])
     )
 
     data class Source(val pkg: String, val count: Int, val lastSeen: Long)
@@ -123,7 +124,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val db = writableDatabase
         db.beginTransaction()
         try {
-            if (p != null && isDuplicate(db, p)) return false
+            if (p != null && (isDuplicate(db, p) || isDeleted(db, pkg, p))) return false
             val id = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
             if (id == -1L) return false
             if (p != null) saveParsed(db, id, p, postedAt)
@@ -157,8 +158,43 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         ).use { it.moveToFirst() }
     }
 
-    /** Xoá thông báo trùng giao dịch đã có (giữ bản lưu trước); tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag. */
-    private fun dropDuplicates(db: SQLiteDatabase) {
+    /** MB gửi lại một giao dịch người dùng đã xoá → không thêm lại. Cùng tiêu chí với [isDuplicate]. */
+    private fun isDeleted(db: SQLiteDatabase, pkg: String, p: Parser.Parsed): Boolean {
+        if (p.time == null || p.balanceAfter == null) return false
+        db.rawQuery("SELECT text FROM queue WHERE package = ? AND status = '$DELETED'", arrayOf(pkg)).use { c ->
+            while (c.moveToNext()) {
+                val d = Parser.parse(c.getString(0)) ?: continue
+                if (d.time == p.time && d.balanceAfter == p.balanceAfter && d.amount == p.amount && d.isIn == p.isIn &&
+                    d.account == p.account && d.description == p.description
+                ) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Người dùng xoá 1 giao dịch: bỏ khỏi transactions và tag, nhưng GIỮ dòng queue (đánh dấu deleted)
+     * để quét lại thanh thông báo hay MB gửi lại không thêm lại giao dịch đó.
+     */
+    fun deleteTransaction(queueId: Long) {
+        val db = writableDatabase
+        val args = arrayOf(queueId.toString())
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE queue SET status = '$DELETED' WHERE id = ?", args)
+            db.delete("transactions", "queue_id = ?", args)
+            db.delete("tx_tags", "queue_id = ?", args)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * Xoá thông báo trùng giao dịch đã có (giữ bản lưu trước); tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag.
+     * Trả về số bản đã xoá.
+     */
+    private fun dropDuplicates(db: SQLiteDatabase): Int {
         val pairs = ArrayList<Pair<Long, Long>>() // bản trùng → bản giữ lại
         db.rawQuery(
             """
@@ -180,6 +216,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             db.delete("transactions", "queue_id = ?", args)
             db.delete("queue", "id = ?", args)
         }
+        return pairs.size
     }
 
     private fun saveParsed(db: SQLiteDatabase, queueId: Long, p: Parser.Parsed, postedAt: Long) {
@@ -202,18 +239,19 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.insertWithOnConflict("transactions", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    /** Phân tích lại toàn bộ queue (sau khi sửa parser). */
+    /** Phân tích lại toàn bộ queue (sau khi sửa parser hoặc người dùng bấm kiểm tra lại) rồi xoá bản trùng; trả về số bản trùng đã xoá. */
     @Synchronized
-    fun reparseAll() {
+    fun reparseAll(): Int {
         val db = writableDatabase
         db.beginTransaction()
         try {
             db.delete("transactions", null, null)
-            db.rawQuery("SELECT id, text, posted_at FROM queue", null).use { c ->
+            db.rawQuery("SELECT id, text, posted_at FROM queue WHERE status != '$DELETED'", null).use { c ->
                 while (c.moveToNext()) Parser.parse(c.getString(1))?.let { saveParsed(db, c.getLong(0), it, c.getLong(2)) }
             }
-            dropDuplicates(db)
+            val removed = dropDuplicates(db)
             db.setTransactionSuccessful()
+            return removed
         } finally {
             db.endTransaction()
         }
@@ -284,7 +322,10 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     /** Thông báo của [pkg] không phân tích được thành giao dịch, mới nhất trước. */
     fun unparsed(pkg: String): List<Item> =
-        query("WHERE package = ? AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC", arrayOf(pkg))
+        query(
+            "WHERE package = ? AND status != '$DELETED' AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC",
+            arrayOf(pkg),
+        )
 
     /** Xoá thông báo không phải giao dịch (OTP, quảng cáo…) cũ hơn [before]; giao dịch giữ mãi. */
     fun purgeNonTransactions(before: Long) {
@@ -320,7 +361,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     private fun query(tail: String, args: Array<String>? = null): List<Item> {
         val out = ArrayList<Item>()
         readableDatabase.rawQuery(
-            "SELECT id, package, title, text, posted_at FROM queue $tail", args
+            "SELECT id, package, title, text, posted_at, status = '$DELETED' FROM queue $tail", args
         ).use { c ->
             while (c.moveToNext()) {
                 out.add(
@@ -330,6 +371,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         title = if (c.isNull(2)) null else c.getString(2),
                         text = c.getString(3),
                         postedAt = c.getLong(4),
+                        deleted = c.getInt(5) == 1,
                     )
                 )
             }
@@ -399,6 +441,9 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     }
 
     companion object {
+        /** queue.status của thông báo có giao dịch người dùng đã xoá. */
+        private const val DELETED = "deleted"
+
         private val DEFAULT_TAGS = listOf("Ăn uống", "Đi lại", "Mua sắm", "Hoá đơn", "Nhà cửa", "Lương", "Chuyển khoản", "Khác")
 
         /** Đủ tương phản trên cả nền sáng và tối. */
