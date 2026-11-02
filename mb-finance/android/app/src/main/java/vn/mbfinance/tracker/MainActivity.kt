@@ -460,6 +460,18 @@ class MainActivity : Activity() {
         }
 
         ui.add(box, ui.button("Xong") { dialog.dismiss() }, 20)
+        ui.add(box, ui.button("Xoá giao dịch", filled = false) {
+            AlertDialog.Builder(this)
+                .setTitle("Xoá giao dịch này?")
+                .setMessage("Giao dịch sẽ không còn trong thống kê. MB gửi lại thông báo này cũng không thêm lại.")
+                .setPositiveButton("Xoá") { _, _ ->
+                    store.deleteTransaction(t.id)
+                    changed = true
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Huỷ", null)
+                .show()
+        }.apply { setTextColor(ui.red) }, 8)
 
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(ScrollView(this).apply { addView(box) })
@@ -609,6 +621,8 @@ class MainActivity : Activity() {
         val scan = section("QUÉT THÔNG BÁO")
         scanText = ui.text("", 14f).also { scan.addView(it) }
         ui.add(scan, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
+        ui.add(scan, ui.button("Kiểm tra lại dữ liệu đã lưu", filled = false) { recheckStored() }, 8)
+        ui.add(scan, ui.text("Đọc lại mọi thông báo MB đã lưu trên máy và xoá giao dịch bị lưu trùng.", 12f, ui.muted), 6)
 
         val log = section("THÔNG BÁO MB ĐÃ BẮT")
         recentBox = ui.vbox().also { log.addView(it) }
@@ -669,6 +683,7 @@ class MainActivity : Activity() {
             if (recent.isEmpty()) recentBox.addView(ui.text("Chưa có. Thông báo từ app đang theo dõi sẽ hiện ở đây.", 13f, ui.muted))
             recent.forEachIndexed { i, it ->
                 val state = when {
+                    it.deleted -> "🗑 giao dịch đã xoá"
                     Parser.parse(it.text) != null -> "✅ giao dịch"
                     Parser.looksLikeTransaction(it.text) -> "❔ giống giao dịch nhưng chưa đọc được"
                     else -> "không phải giao dịch"
@@ -723,6 +738,21 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** Phân tích lại toàn bộ thông báo đã lưu + xoá bản trùng (chạy nền vì có thể nhiều dữ liệu). */
+    private fun recheckStored() {
+        thread {
+            val removed = runCatching { store.reparseAll() }.getOrNull()
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                toast(when (removed) {
+                    null -> "Kiểm tra lại thất bại"
+                    0 -> "Đã kiểm tra lại, không có giao dịch trùng"
+                    else -> "Đã kiểm tra lại, xoá $removed giao dịch trùng"
+                })
+                reload()
+            }
+        }
+    }
 
     private fun scanNotifications() {
         val listener = MbNotificationListener.instance
