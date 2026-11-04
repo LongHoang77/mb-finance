@@ -18,6 +18,7 @@ data class Tx(
     val date: LocalDate,
     val timeFromText: Boolean,
     val tag: Tag?,
+    val manual: Boolean = false, // nhập tay (tiền mặt…), không từ thông báo MB
 )
 
 /** Tag thu chi do người dùng tự đặt; [color] là ARGB. */
@@ -40,6 +41,22 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
 
     /** Số dư theo thông báo mới nhất có ghi số dư. */
     val latestBalance: Long? = txs.firstOrNull { it.balanceAfter != null }?.balanceAfter
+
+    private val manual = txs.filter { it.manual }.sortedByDescending { it.id } // nhập gần nhất trước
+
+    val hasCash get() = manual.isNotEmpty()
+
+    /** Tiền mặt còn lại = tiền vào − tiền ra nhập tay, mọi thời gian. */
+    val cashBalance: Long = manual.sumOf { if (it.isIn) it.amount else -it.amount }
+
+    /** Tag của giao dịch tay nhập gần nhất (mặc định cho form). */
+    val lastManualTag: Tag? get() = manual.firstOrNull()?.tag
+
+    /** Mẫu nhập nhanh: giao dịch tay dùng nhiều nhất (cùng nội dung, số tiền, chiều, tag); bằng nhau thì mới hơn trước. */
+    fun templates(n: Int): List<Tx> =
+        manual.filter { it.description != null }.take(100)
+            .groupBy { listOf(it.description, it.amount, it.isIn, it.tag?.id) }
+            .values.sortedByDescending { it.size }.map { it.first() }.take(n)
 
     fun inMonth(m: YearMonth): List<Tx> = byMonth[m].orEmpty()
 

@@ -28,6 +28,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     data class Source(val pkg: String, val count: Int, val lastSeen: Long)
 
+    /** Kết quả [reparseAll]: số bản trùng đã xoá, số giao dịch có cộng phí/VAT. */
+    data class Recheck(val duplicates: Int, val withFee: Int)
+
+    /** 1 giao dịch MB có số dư, dùng để đối soát phí theo số dư liền trước (xem [chain]). */
+    private data class Link(val id: Long, val amount: Long, val balance: Long, val text: String)
+
     /** Số liệu cho widget, tính bằng SQL thay vì đọc hết bảng transactions. */
     data class Brief(val totalIn: Long, val totalOut: Long, val balance: Long?, val lastTxTime: Long?) {
         val net get() = totalIn - totalOut
@@ -127,7 +133,18 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             if (p != null && (isDuplicate(db, p) || isDeleted(db, pkg, p))) return false
             val id = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
             if (id == -1L) return false
-            if (p != null) saveParsed(db, id, p, postedAt)
+            if (p != null) {
+                saveParsed(db, id, p, postedAt)
+                // Đối soát phí cho giao dịch mới và giao dịch ngay sau nó (thông báo có thể đến trễ)
+                if (p.account != null && p.balanceAfter != null) {
+                    val c = chain(db, p.account)
+                    val i = c.indexOfFirst { it.id == id }
+                    if (i >= 0) {
+                        settle(db, c, i)
+                        if (i + 1 < c.size) settle(db, c, i + 1)
+                    }
+                }
+            }
             db.setTransactionSuccessful()
             return true
         } finally {
@@ -139,23 +156,26 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
      * MB gửi lại / cập nhật thông báo → postTime hoặc text khác nhưng vẫn là 1 giao dịch.
      * Coi là trùng khi khớp TK, chiều, số tiền, số dư sau, nội dung và giờ GHI TRONG thông báo;
      * thiếu số dư hoặc giờ thì không đủ chắc → không coi là trùng.
+     * amount đã lưu có thể gồm phí → so số tiền GD đọc lại từ thông báo gốc.
      */
     private fun isDuplicate(db: SQLiteDatabase, p: Parser.Parsed): Boolean {
         val time = p.time ?: return false
         val balance = p.balanceAfter ?: return false
         return db.rawQuery(
             """
-            SELECT 1 FROM transactions
-            WHERE time_from_text = 1 AND tx_time = ? AND amount = ? AND direction = ?
-              AND balance_after = ? AND COALESCE(account, '') = ? AND COALESCE(description, '') = ?
-            LIMIT 1
+            SELECT q.text FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE t.time_from_text = 1 AND t.tx_time = ? AND t.direction = ?
+              AND t.balance_after = ? AND COALESCE(t.account, '') = ? AND COALESCE(t.description, '') = ?
             """.trimIndent(),
             // rawQuery không nhận tham số null → so sánh qua COALESCE
             arrayOf(
-                time.toString(), p.amount.toString(), if (p.isIn) "in" else "out", balance.toString(),
+                time.toString(), if (p.isIn) "in" else "out", balance.toString(),
                 p.account.orEmpty(), p.description.orEmpty(),
             ),
-        ).use { it.moveToFirst() }
+        ).use { c ->
+            while (c.moveToNext()) if (Parser.parse(c.getString(0))?.amount == p.amount) return true
+            false
+        }
     }
 
     /** MB gửi lại một giao dịch người dùng đã xoá → không thêm lại. Cùng tiêu chí với [isDuplicate]. */
@@ -219,55 +239,121 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         return pairs.size
     }
 
-    private fun saveParsed(db: SQLiteDatabase, queueId: Long, p: Parser.Parsed, postedAt: Long) {
-        val time = p.time ?: postedAt
+    private fun saveParsed(db: SQLiteDatabase, queueId: Long, p: Parser.Parsed, postedAt: Long) =
+        saveTx(db, queueId, p.amount, p.isIn, p.balanceAfter, p.account, p.description, p.time ?: postedAt, p.time != null)
+
+    private fun saveTx(
+        db: SQLiteDatabase, queueId: Long, amount: Long, isIn: Boolean, balanceAfter: Long?, account: String?,
+        description: String?, time: Long, timeFromText: Boolean,
+    ) {
         val d = Instant.ofEpochMilli(time).atZone(Ledger.VN).toLocalDate()
         val cv = ContentValues().apply {
             put("queue_id", queueId)
-            put("amount", p.amount)
-            put("direction", if (p.isIn) "in" else "out")
-            put("balance_after", p.balanceAfter)
-            put("account", p.account)
-            put("description", p.description)
+            put("amount", amount)
+            put("direction", if (isIn) "in" else "out")
+            put("balance_after", balanceAfter)
+            put("account", account)
+            put("description", description)
             put("tx_time", time)
             put("tx_date", d.toString())
             put("tx_year", d.year)
             put("tx_month", d.monthValue)
             put("tx_day", d.dayOfMonth)
-            put("time_from_text", if (p.time != null) 1 else 0)
+            put("time_from_text", if (timeFromText) 1 else 0)
         }
         db.insertWithOnConflict("transactions", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    /** Phân tích lại toàn bộ queue (sau khi sửa parser hoặc người dùng bấm kiểm tra lại) rồi xoá bản trùng; trả về số bản trùng đã xoá. */
+    /**
+     * Phân tích lại toàn bộ thông báo (sau khi sửa parser hoặc người dùng bấm kiểm tra lại), xoá bản trùng rồi đối soát phí.
+     * Giao dịch nhập tay giữ nguyên.
+     */
     @Synchronized
-    fun reparseAll(): Int {
+    fun reparseAll(): Recheck {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("transactions", null, null)
-            db.rawQuery("SELECT id, text, posted_at FROM queue WHERE status != '$DELETED'", null).use { c ->
+            db.delete("transactions", "queue_id NOT IN (SELECT id FROM queue WHERE package = '$MANUAL')", null)
+            db.rawQuery(
+                "SELECT id, text, posted_at FROM queue WHERE status != '$DELETED' AND package != '$MANUAL'", null
+            ).use { c ->
                 while (c.moveToNext()) Parser.parse(c.getString(1))?.let { saveParsed(db, c.getLong(0), it, c.getLong(2)) }
             }
             val removed = dropDuplicates(db)
+            val accounts = ArrayList<String>()
+            db.rawQuery(
+                "SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL AND balance_after IS NOT NULL", null
+            ).use { c -> while (c.moveToNext()) accounts.add(c.getString(0)) }
+            var withFee = 0
+            for (acc in accounts) {
+                val c = chain(db, acc)
+                for (i in c.indices) if (settle(db, c, i)) withFee++
+            }
             db.setTransactionSuccessful()
-            return removed
+            return Recheck(removed, withFee)
         } finally {
             db.endTransaction()
         }
     }
 
-    /** Giao dịch của [pkg], mới nhất trước. */
+    /** Giao dịch MB có số dư của [account], theo thứ tự thời gian. */
+    private fun chain(db: SQLiteDatabase, account: String): List<Link> {
+        val out = ArrayList<Link>()
+        db.rawQuery(
+            """
+            SELECT t.queue_id, t.amount, t.balance_after, q.text FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE t.account = ? AND t.balance_after IS NOT NULL AND q.package != '$MANUAL'
+            ORDER BY t.tx_time, t.queue_id
+            """.trimIndent(),
+            arrayOf(account),
+        ).use { c -> while (c.moveToNext()) out.add(Link(c.getLong(0), c.getLong(1), c.getLong(2), c.getString(3))) }
+        return out
+    }
+
+    /** amount của chain[i] = GD + phí xác nhận được bằng số dư liền trước ([Parser.fee]); true nếu có phí. */
+    private fun settle(db: SQLiteDatabase, chain: List<Link>, i: Int): Boolean {
+        val l = chain[i]
+        val p = Parser.parse(l.text) ?: return false
+        val fee = Parser.fee(p, chain.getOrNull(i - 1)?.balance)
+        if (p.amount + fee != l.amount) {
+            db.execSQL("UPDATE transactions SET amount = ? WHERE queue_id = ?", arrayOf<Any>(p.amount + fee, l.id))
+        }
+        return fee > 0
+    }
+
+    /** Thêm ([queueId] null) hoặc sửa giao dịch nhập tay (tiền mặt…); trả về queue_id. */
+    fun saveManual(queueId: Long?, amount: Long, isIn: Boolean, time: Long, description: String?, tagId: Long?): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            // Dòng queue chỉ làm khoá cho tag/xoá; dữ liệu nằm ở transactions
+            val id = queueId ?: db.insertOrThrow("queue", null, ContentValues().apply {
+                put("uuid", UUID.randomUUID().toString())
+                put("package", MANUAL)
+                put("text", "")
+                put("posted_at", System.currentTimeMillis())
+            })
+            saveTx(db, id, amount, isIn, null, null, description, time, true)
+            setTag(id, tagId)
+            db.setTransactionSuccessful()
+            return id
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Giao dịch của [pkg] và giao dịch nhập tay, mới nhất trước. */
     fun transactions(pkg: String): List<Tx> {
         val out = ArrayList<Tx>()
         readableDatabase.rawQuery(
             """
             SELECT t.queue_id, t.amount, t.direction, t.balance_after, t.account, t.description,
-                   t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text, g.id, g.name, g.color
+                   t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text, g.id, g.name, g.color,
+                   q.package = '$MANUAL'
             FROM transactions t JOIN queue q ON q.id = t.queue_id
             LEFT JOIN tx_tags tt ON tt.queue_id = t.queue_id
             LEFT JOIN tags g ON g.id = tt.tag_id
-            WHERE q.package = ?
+            WHERE q.package IN (?, '$MANUAL')
             ORDER BY t.tx_time DESC, t.queue_id DESC
             """.trimIndent(),
             arrayOf(pkg),
@@ -285,6 +371,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         date = LocalDate.of(c.getInt(7), c.getInt(8), c.getInt(9)),
                         timeFromText = c.getInt(10) == 1,
                         tag = if (c.isNull(11)) null else Tag(c.getLong(11), c.getString(12), c.getInt(13)),
+                        manual = c.getInt(14) == 1,
                     )
                 )
             }
@@ -299,7 +386,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.rawQuery(
             """
             SELECT t.direction, SUM(t.amount) FROM transactions t JOIN queue q ON q.id = t.queue_id
-            WHERE q.package = ? AND t.tx_year = ? AND t.tx_month = ? GROUP BY t.direction
+            WHERE q.package IN (?, '$MANUAL') AND t.tx_year = ? AND t.tx_month = ? GROUP BY t.direction
             """.trimIndent(),
             arrayOf(pkg, month.year.toString(), month.monthValue.toString()),
         ).use { c ->
@@ -349,7 +436,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     /** Nội dung thông báo gốc của 1 bản ghi queue. */
     fun text(id: Long): String? = query("WHERE id = ?", arrayOf(id.toString())).firstOrNull()?.text
 
-    fun recent(limit: Int): List<Item> = query("ORDER BY id DESC LIMIT $limit")
+    fun recent(limit: Int): List<Item> = query("WHERE package != '$MANUAL' ORDER BY id DESC LIMIT $limit")
 
     /** Đổi mỗi khi hàng đợi có bản ghi mới/bị xoá — dùng để biết khi nào cần tính lại thống kê. */
     fun dataKey(): String =
@@ -443,6 +530,9 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     companion object {
         /** queue.status của thông báo có giao dịch người dùng đã xoá. */
         private const val DELETED = "deleted"
+
+        /** queue.package của giao dịch nhập tay. */
+        private const val MANUAL = "manual"
 
         private val DEFAULT_TAGS = listOf("Ăn uống", "Đi lại", "Mua sắm", "Hoá đơn", "Nhà cửa", "Lương", "Chuyển khoản", "Khác")
 

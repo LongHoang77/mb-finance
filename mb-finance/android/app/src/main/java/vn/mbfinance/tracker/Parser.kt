@@ -11,7 +11,7 @@ import java.time.ZoneOffset
 object Parser {
 
     /** Tăng mỗi khi sửa regex để app tự phân tích lại dữ liệu cũ. */
-    const val VERSION = 1
+    const val VERSION = 2
 
     data class Parsed(
         val amount: Long, // VND, luôn dương
@@ -20,6 +20,7 @@ object Parser {
         val account: String?,
         val description: String?,
         val time: Long?, // epoch ms nếu thông báo có ghi giờ
+        val extras: List<Long> = emptyList(), // số tiền VND khác trong thông báo (phí, VAT…), ứng viên cho [fee]
     )
 
     private val VN_OFFSET = ZoneOffset.ofHours(7)
@@ -34,6 +35,8 @@ object Parser {
     private val ACCOUNT = Regex("""TK\s*:?\s*([0-9xX*]{4,})""")
     // "ND: ..." tới hết chuỗi; cần ":" và đứng sau "|"/khoảng trắng để không khớp "ND" trong "VND"
     private val DESC = Regex("""(?:^|[|\s])ND\s*:\s*(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    // Mọi số tiền VND, không phụ thuộc chữ đứng trước ("PHI", "VAT"…)
+    private val MONEY = Regex("""(\d[\d.,]*)\s*(?:VND|đ)""", RegexOption.IGNORE_CASE)
     // Số tiền có dấu +/-: dấu hiệu thông báo biến động số dư, kể cả mẫu mới parser chưa đọc được
     private val SIGNED_MONEY = Regex("""[+-]\s*[\d.,]+\s*(?:VND|đ)""", RegexOption.IGNORE_CASE)
     private val SEPARATORS = Regex("""[.,\s]""")
@@ -64,13 +67,36 @@ object Parser {
         val amount = toVnd(a.groupValues[2]) ?: return null
         if (amount <= 0) return null
         val t = TIME.find(text)
+        val b = BALANCE.find(text)
+        val taken = listOfNotNull(a.range, b?.range)
+        val extras = MONEY.findAll(text)
+            .filter { m -> taken.none { it.first <= m.range.last && m.range.first <= it.last } }
+            .mapNotNull { toVnd(it.groupValues[1])?.takeIf { v -> v > 0 } }
+            .toList()
         return Parsed(
             amount = amount,
             isIn = a.groupValues[1] == "+",
-            balanceAfter = BALANCE.find(text)?.let { toVnd(it.groupValues[1]) },
+            balanceAfter = b?.let { toVnd(it.groupValues[1]) },
             account = ACCOUNT.find(text)?.groupValues?.get(1),
             description = DESC.find(text)?.groupValues?.get(1)?.trim()?.replace(SPACES, " "),
             time = t?.let { toEpoch(it.groupValues[1], it.groupValues[2]) },
+            extras = extras,
         )
+    }
+
+    /**
+     * Phí/VAT bị trừ thêm ngoài GD: số dư giảm nhiều hơn GD đúng bằng 1 số (hoặc tổng vài số) trong [Parsed.extras].
+     * Không khớp, thiếu số dư hoặc là tiền vào → 0.
+     */
+    fun fee(p: Parsed, prevBalance: Long?): Long {
+        val after = p.balanceAfter ?: return 0
+        if (p.isIn || prevBalance == null) return 0
+        val extra = prevBalance - after - p.amount
+        if (extra <= 0) return 0
+        val xs = p.extras.take(8)
+        for (mask in 1 until (1 shl xs.size)) {
+            if (xs.indices.sumOf { if ((mask shr it) and 1 == 1) xs[it] else 0L } == extra) return extra
+        }
+        return 0
     }
 }

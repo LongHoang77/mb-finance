@@ -2,7 +2,9 @@ package vn.mbfinance.tracker
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DatePickerDialog
 import android.app.Dialog
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -13,11 +15,15 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
+import android.text.Editable
+import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.Window
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -26,7 +32,10 @@ import android.widget.TextView
 import android.widget.Toast
 import vn.mbfinance.tracker.Ui.Companion.MATCH
 import vn.mbfinance.tracker.Ui.Companion.WRAP
+import java.text.NumberFormat
 import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -46,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var overviewBox: LinearLayout
     private lateinit var txBox: LinearLayout
     private lateinit var settingsBox: LinearLayout
+    private lateinit var fab: View
     private val tabViews = ArrayList<TextView>()
 
     private lateinit var permText: TextView
@@ -81,6 +91,9 @@ class MainActivity : Activity() {
     private val timeFmt = DateTimeFormatter.ofPattern("HH:mm dd/MM/yyyy").withZone(Ledger.VN)
     private val clockFmt = DateTimeFormatter.ofPattern("HH:mm").withZone(Ledger.VN)
     private val dayFmt = DateTimeFormatter.ofPattern("EEEE, dd/MM/yyyy", Locale("vi", "VN"))
+    private val dateFmt = DateTimeFormatter.ofPattern("dd/MM/yyyy")
+    private val hmFmt = DateTimeFormatter.ofPattern("HH:mm")
+    private val groupFmt = NumberFormat.getInstance(Locale("vi", "VN"))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,6 +126,17 @@ class MainActivity : Activity() {
             box.setPadding(dp(16), dp(4), dp(16), dp(24))
             ScrollView(this).apply { addView(box) }.also { content.addView(it) }
         }
+        txBox.setPadding(dp(16), dp(4), dp(16), dp(96)) // chừa chỗ cho nút nổi
+        fab = ui.text("+", 30f, ui.onPrimary).apply {
+            gravity = Gravity.CENTER
+            background = ui.pressable(ui.primary, 28)
+            elevation = dp(6).toFloat()
+            contentDescription = "Thêm giao dịch"
+            setOnClickListener { showManualForm(null) }
+        }
+        content.addView(fab, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, dp(20), dp(20))
+        })
         shell.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
         shell.addView(bottomNav())
         setContentView(shell)
@@ -160,6 +184,7 @@ class MainActivity : Activity() {
 
     private fun selectTab(i: Int) {
         pages.forEachIndexed { j, p -> p.visibility = if (j == i) View.VISIBLE else View.GONE }
+        fab.visibility = if (i == 1) View.VISIBLE else View.GONE
         tabViews.forEachIndexed { j, v ->
             val on = j == i
             v.setTextColor(if (on) ui.primary else ui.muted)
@@ -214,13 +239,25 @@ class MainActivity : Activity() {
         val hero = ui.card(radius = 22, color = ui.primary).apply { setPadding(dp(20), dp(18), dp(20), dp(18)) }
         hero.addView(ui.text("Chênh lệch thu − chi", 13f, ui.onPrimary).apply { alpha = 0.8f })
         hero.addView(ui.text(ui.money(s.net, signed = true), 30f, ui.onPrimary, bold = true))
-        ledger.latestBalance?.let {
-            hero.addView(ui.text("Số dư gần nhất: ${ui.money(it)}", 13f, ui.onPrimary).apply {
-                alpha = 0.85f
-                setPadding(0, dp(6), 0, 0)
-            })
-        }
         ui.add(box, hero)
+
+        // Số dư hiện tại (không theo tháng): ngân hàng = SD thông báo MB mới nhất, tiền mặt = giao dịch tay
+        val bank = ledger.latestBalance
+        if (bank != null || ledger.hasCash) {
+            val c = ui.card()
+            c.addView(ui.text("Tổng số dư", 13f, ui.muted))
+            c.addView(ui.text(ui.money((bank ?: 0) + ledger.cashBalance), 22f, bold = true))
+            fun part(label: String, value: String) = ui.vbox().apply {
+                addView(ui.text(label, 12f, ui.muted))
+                addView(ui.text(value, 15f, bold = true))
+            }
+            ui.add(c, ui.row(
+                part("Ngân hàng", bank?.let { ui.money(it) } ?: "—"),
+                part("Tiền mặt", ui.money(ledger.cashBalance)),
+                gap = 12,
+            ), 10)
+            ui.add(box, c)
+        }
 
         ui.add(box, ui.row(
             kpi("Tiền vào", s.totalIn, s.countIn, ui.green),
@@ -359,6 +396,7 @@ class MainActivity : Activity() {
         // Thông báo không ghi giờ giao dịch → đang dùng giờ máy nhận, ghi chú để phân biệt
         val meta = SpannableStringBuilder(fmt.format(Instant.ofEpochMilli(t.time)))
         if (!t.timeFromText) meta.append(" · giờ nhận thông báo")
+        if (t.manual) meta.append(" · Tiền mặt")
         t.tag?.let { meta.append("   ").append(ui.dotLabel(it.name, it.color)) }
         left.addView(ui.text(meta, 12f, ui.muted))
         val amount = ui.text(
@@ -376,15 +414,9 @@ class MainActivity : Activity() {
     private fun showTx(t: Tx) {
         val dialog = Dialog(this)
         val color = if (t.isIn) ui.green else ui.red
-        val box = ui.vbox().apply {
-            background = ui.sheet()
-            setPadding(dp(20), dp(10), dp(20), dp(20))
-        }
+        val box = sheetBox()
         fun addWrap(v: View, gap: Int) = box.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(gap) })
 
-        box.addView(View(this).apply { background = ui.rounded(ui.line, 3) }, LinearLayout.LayoutParams(dp(40), dp(5)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-        })
         addWrap(ui.text(if (t.isIn) "Tiền vào" else "Tiền ra", 12f, color, bold = true).apply {
             background = ui.rounded(ui.soft(color), 20)
             setPadding(dp(10), dp(4), dp(10), dp(4))
@@ -393,7 +425,7 @@ class MainActivity : Activity() {
         ui.add(box, ui.text(t.description ?: "(không có nội dung)", 16f).apply { setTextIsSelectable(true) }, 4)
         val day = dayFmt.format(t.date).replaceFirstChar { it.uppercase() }
         val clock = clockFmt.format(Instant.ofEpochMilli(t.time)) + if (t.timeFromText) "" else " (giờ nhận thông báo)"
-        ui.add(box, ui.text("$day · $clock", 13f, ui.muted), 4)
+        ui.add(box, ui.text("$day · $clock" + if (t.manual) " · Tiền mặt" else "", 13f, ui.muted), 4)
 
         // Tag: chạm để gắn, chạm lại tag đang chọn để bỏ
         ui.add(box, ui.text("TAG", 12f, ui.muted, bold = true), 20)
@@ -424,7 +456,12 @@ class MainActivity : Activity() {
         }
         fillTags()
 
+        val raw = if (t.manual) null else store.text(t.id)
+        // amount lớn hơn GD trong thông báo = đã cộng phí/VAT khớp số dư
+        val gd = raw?.let { Parser.parse(it) }?.amount?.takeIf { it < t.amount }
         val info = listOfNotNull(
+            gd?.let { "Số tiền GD" to ui.money(it) },
+            gd?.let { "Phí/VAT (khớp số dư)" to ui.money(t.amount - it) },
             t.balanceAfter?.let { "Số dư sau giao dịch" to ui.money(it) },
             t.account?.let { "Tài khoản" to it },
         )
@@ -440,7 +477,7 @@ class MainActivity : Activity() {
             ui.add(box, card, 20)
         }
 
-        store.text(t.id)?.let { raw ->
+        if (raw != null) {
             val rawText = ui.text(raw, 13f).apply {
                 setTextIsSelectable(true)
                 background = ui.rounded(ui.bg, 10)
@@ -460,10 +497,19 @@ class MainActivity : Activity() {
         }
 
         ui.add(box, ui.button("Xong") { dialog.dismiss() }, 20)
+        if (t.manual) {
+            ui.add(box, ui.button("Sửa", filled = false) {
+                dialog.dismiss()
+                showManualForm(t)
+            }, 8)
+        }
         ui.add(box, ui.button("Xoá giao dịch", filled = false) {
             AlertDialog.Builder(this)
                 .setTitle("Xoá giao dịch này?")
-                .setMessage("Giao dịch sẽ không còn trong thống kê. MB gửi lại thông báo này cũng không thêm lại.")
+                .setMessage(
+                    if (t.manual) "Giao dịch sẽ không còn trong thống kê."
+                    else "Giao dịch sẽ không còn trong thống kê. MB gửi lại thông báo này cũng không thêm lại."
+                )
                 .setPositiveButton("Xoá") { _, _ ->
                     store.deleteTransaction(t.id)
                     changed = true
@@ -473,15 +519,188 @@ class MainActivity : Activity() {
                 .show()
         }.apply { setTextColor(ui.red) }, 8)
 
+        dialog.setOnDismissListener { if (changed) reload() }
+        showSheet(dialog, box)
+    }
+
+    /** Form thêm ([t] null) hoặc sửa giao dịch nhập tay: chiều, số tiền, ngày giờ, nội dung, tag. */
+    private fun showManualForm(t: Tx?) {
+        val dialog = Dialog(this)
+        val box = sheetBox()
+        ui.add(box, ui.text(if (t == null) "Thêm giao dịch" else "Sửa giao dịch", 18f, bold = true), 14)
+        // Mẫu gần đây: điền sau khi dựng xong các ô bên dưới
+        val tplRow = LinearLayout(this)
+        val templates = if (t == null) ledger.templates(8) else emptyList()
+        if (templates.isNotEmpty()) {
+            ui.add(box, HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(tplRow)
+            }, 12)
+        }
+
+        var isIn = t?.isIn ?: false
+        val dirRow = LinearLayout(this)
+        fun fillDir() {
+            dirRow.removeAllViews()
+            listOf(false to "Tiền ra", true to "Tiền vào").forEachIndexed { i, (v, s) ->
+                dirRow.addView(
+                    ui.chip(s, v == isIn) { isIn = v; fillDir() },
+                    LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(8) },
+                )
+            }
+        }
+        fillDir()
+        ui.add(box, dirRow, 14)
+
+        val amount = ui.input("Số tiền (₫)").apply { inputType = InputType.TYPE_CLASS_NUMBER }
+        // Tự thêm dấu chấm hàng nghìn khi gõ
+        amount.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable) {
+                val digits = s.filter { it.isDigit() }.toString().trimStart('0').take(13)
+                val f = if (digits.isEmpty()) "" else groupFmt.format(digits.toLong())
+                if (f != s.toString()) {
+                    amount.setText(f)
+                    amount.setSelection(f.length)
+                }
+            }
+        })
+        t?.let { amount.setText(it.amount.toString()) }
+        ui.add(box, amount, 12)
+        val quick = LinearLayout(this)
+        for (v in QUICK_AMOUNTS) {
+            quick.addView(
+                ui.chip(short(v), false) { amount.setText(v.toString()) },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { if (quick.childCount > 0) marginStart = dp(6) },
+            )
+        }
+        ui.add(box, HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(quick)
+        }, 8)
+
+        val now = LocalDateTime.now(Ledger.VN).withSecond(0).withNano(0)
+        val today = now.toLocalDate()
+        // Thêm mới khi đang xem tháng cũ → mặc định cuối tháng đó
+        var at = t?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it.time), Ledger.VN) }
+            ?: if (month < YearMonth.from(today)) month.atEndOfMonth().atTime(now.toLocalTime()) else now
+        val dateBtn = ui.button("", filled = false) {}
+        val timeBtn = ui.button("", filled = false) {}
+        val dayRow = LinearLayout(this)
+        fun showAt() {
+            dateBtn.text = at.format(dateFmt)
+            timeBtn.text = at.format(hmFmt)
+            dayRow.removeAllViews()
+            listOf("Hôm nay" to today, "Hôm qua" to today.minusDays(1)).forEachIndexed { i, (label, d) ->
+                dayRow.addView(
+                    ui.chip(label, at.toLocalDate() == d) {
+                        at = LocalDateTime.of(d, at.toLocalTime())
+                        showAt()
+                    },
+                    LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(6) },
+                )
+            }
+        }
+        showAt()
+        dateBtn.setOnClickListener {
+            DatePickerDialog(this, { _, y, m, d ->
+                at = LocalDateTime.of(LocalDate.of(y, m + 1, d), at.toLocalTime())
+                showAt()
+            }, at.year, at.monthValue - 1, at.dayOfMonth).show()
+        }
+        timeBtn.setOnClickListener {
+            TimePickerDialog(this, { _, h, min ->
+                at = at.withHour(h).withMinute(min)
+                showAt()
+            }, at.hour, at.minute, true).show()
+        }
+        ui.add(box, ui.row(dateBtn, timeBtn), 12)
+        ui.add(box, dayRow, 8)
+
+        val desc = ui.input("Nội dung (tuỳ chọn), vd: Ăn sáng").apply { setText(t?.description.orEmpty()) }
+        ui.add(box, desc, 12)
+
+        ui.add(box, ui.text("TAG", 12f, ui.muted, bold = true), 20)
+        val tagFlow = ui.flow().also { ui.add(box, it, 8) }
+        var tagId = if (t == null) ledger.lastManualTag?.id else t.tag?.id
+        fun fillTags() {
+            tagFlow.removeAllViews()
+            for (g in store.tags()) {
+                tagFlow.addView(ui.tagChip(g.name, g.color, g.id == tagId) {
+                    tagId = if (tagId == g.id) null else g.id
+                    fillTags()
+                })
+            }
+            tagFlow.addView(ui.tagChip("+ Tag mới", null, false) {
+                askTagName("Tag mới", "") { name ->
+                    val g = store.addTag(name)
+                    if (g == null) toast("Đã có tag \"$name\"") else { tagId = g.id }
+                    renderTagSettings()
+                    fillTags()
+                }
+            })
+        }
+        fillTags()
+
+        for (m in templates) {
+            tplRow.addView(
+                ui.chip("${m.description} · ${short(m.amount)}", false) {
+                    isIn = m.isIn
+                    fillDir()
+                    amount.setText(m.amount.toString())
+                    desc.setText(m.description)
+                    tagId = m.tag?.id
+                    fillTags()
+                },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { if (tplRow.childCount > 0) marginStart = dp(6) },
+            )
+        }
+
+        ui.add(box, ui.button("Lưu") {
+            val value = amount.text.filter { it.isDigit() }.toString().toLongOrNull() ?: 0L
+            if (value <= 0) {
+                toast("Nhập số tiền")
+                return@button
+            }
+            val time = at.atZone(Ledger.VN).toInstant().toEpochMilli()
+            store.saveManual(t?.id, value, isIn, time, desc.text.toString().trim().take(500).ifEmpty { null }, tagId)
+            month = YearMonth.from(at)
+            dialog.dismiss()
+            reload()
+        }, 20)
+        showSheet(dialog, box)
+    }
+
+    /** 30000 → "30k", 1500000 → "1,5tr". */
+    private fun short(n: Long): String = when {
+        n >= 1_000_000 && n % 100_000 == 0L -> {
+            val d = n / 100_000
+            if (d % 10 == 0L) "${d / 10}tr" else "${d / 10},${d % 10}tr"
+        }
+        n % 1000 == 0L -> "${n / 1000}k"
+        else -> groupFmt.format(n)
+    }
+
+    /** Khung bottom sheet có thanh kéo; thêm nội dung rồi gọi [showSheet]. */
+    private fun sheetBox() = ui.vbox().apply {
+        background = ui.sheet()
+        setPadding(dp(20), dp(10), dp(20), dp(20))
+        addView(View(this@MainActivity).apply { background = ui.rounded(ui.line, 3) }, LinearLayout.LayoutParams(dp(40), dp(5)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
+    }
+
+    private fun showSheet(dialog: Dialog, box: View) {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(ScrollView(this).apply { addView(box) })
-        dialog.setOnDismissListener { if (changed) reload() }
         dialog.show()
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setLayout(MATCH, WRAP)
             setGravity(Gravity.BOTTOM)
             setWindowAnimations(android.R.style.Animation_InputMethod)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
     }
 
@@ -622,7 +841,10 @@ class MainActivity : Activity() {
         scanText = ui.text("", 14f).also { scan.addView(it) }
         ui.add(scan, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
         ui.add(scan, ui.button("Kiểm tra lại dữ liệu đã lưu", filled = false) { recheckStored() }, 8)
-        ui.add(scan, ui.text("Đọc lại mọi thông báo MB đã lưu trên máy và xoá giao dịch bị lưu trùng.", 12f, ui.muted), 6)
+        ui.add(scan, ui.text(
+            "Quét lại thanh thông báo, đọc lại mọi thông báo MB đã lưu, cộng phí/VAT khi khớp số dư và xoá giao dịch bị lưu trùng.",
+            12f, ui.muted,
+        ), 6)
 
         val log = section("THÔNG BÁO MB ĐÃ BẮT")
         recentBox = ui.vbox().also { log.addView(it) }
@@ -738,17 +960,20 @@ class MainActivity : Activity() {
             .show()
     }
 
-    /** Phân tích lại toàn bộ thông báo đã lưu + xoá bản trùng (chạy nền vì có thể nhiều dữ liệu). */
+    /** Quét bù thông báo, phân tích lại toàn bộ, xoá bản trùng và đối soát phí (chạy nền vì có thể nhiều dữ liệu). */
     private fun recheckStored() {
         thread {
-            val removed = runCatching { store.reparseAll() }.getOrNull()
+            val scanned = runCatching { MbNotificationListener.catchUp(applicationContext) }.getOrDefault(-1)
+            val r = runCatching { store.reparseAll() }.getOrNull()
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                toast(when (removed) {
-                    null -> "Kiểm tra lại thất bại"
-                    0 -> "Đã kiểm tra lại, không có giao dịch trùng"
-                    else -> "Đã kiểm tra lại, xoá $removed giao dịch trùng"
-                })
+                val msg = if (r == null) "Kiểm tra lại thất bại" else buildString {
+                    append("Đã kiểm tra lại")
+                    if (scanned > 0) append(", lưu thêm $scanned thông báo")
+                    append(if (r.duplicates > 0) ", xoá ${r.duplicates} bản trùng" else ", không có bản trùng")
+                    if (r.withFee > 0) append(", ${r.withFee} giao dịch có phí/VAT")
+                }
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 reload()
             }
         }
@@ -834,5 +1059,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val UNTAGGED = -1L
+        private val QUICK_AMOUNTS = listOf(20_000L, 50_000L, 100_000L, 200_000L, 500_000L)
     }
 }
