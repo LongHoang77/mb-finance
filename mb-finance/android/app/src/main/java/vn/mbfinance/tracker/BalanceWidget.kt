@@ -103,8 +103,11 @@ class BalanceWidget : AppWidgetProvider() {
             v.setTextViewText(
                 R.id.w_balance,
                 when {
-                    b.balance != null && b.lastTxTime != null ->
-                        "Số dư ${ui.money(b.balance)} · ${timeFmt.format(Instant.ofEpochMilli(b.lastTxTime))}"
+                    b.balance != null || b.cash != null -> listOfNotNull(
+                        "Tổng ${ui.short((b.balance ?: 0) + (b.cash ?: 0))}",
+                        b.balance?.let { "Bank ${ui.short(it)}" },
+                        b.cash?.let { "Money ${ui.short(it)}" },
+                    ).joinToString(" · ")
                     b.lastTxTime != null -> "GD cuối ${timeFmt.format(Instant.ofEpochMilli(b.lastTxTime))}"
                     else -> "Chưa có giao dịch"
                 },

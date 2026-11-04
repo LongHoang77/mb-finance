@@ -57,6 +57,20 @@ class Ui(private val ctx: Context) {
         return "$sign${nf.format(abs(n))} ₫"
     }
 
+    /** Gọn cho chip/widget: ≥ 1 triệu làm tròn "12,6tr", số nghìn chẵn "30k", còn lại để nguyên. */
+    fun short(n: Long): String {
+        val sign = if (n < 0) "−" else ""
+        val a = abs(n)
+        return sign + when {
+            a >= 1_000_000 -> {
+                val d = (a + 50_000) / 100_000
+                if (d % 10 == 0L) "${d / 10}tr" else "${d / 10},${d % 10}tr"
+            }
+            a % 1000 == 0L && a > 0 -> "${a / 1000}k"
+            else -> nf.format(a)
+        }
+    }
+
     fun rounded(color: Int, radius: Int = 16, stroke: Int? = null) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = dp(radius).toFloat()

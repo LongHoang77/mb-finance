@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var pages: List<ScrollView>
     private lateinit var overviewBox: LinearLayout
     private lateinit var txBox: LinearLayout
+    private lateinit var cashBox: LinearLayout
     private lateinit var settingsBox: LinearLayout
     private lateinit var fab: View
     private val tabViews = ArrayList<TextView>()
@@ -120,13 +121,14 @@ class MainActivity : Activity() {
 
         overviewBox = ui.vbox()
         txBox = ui.vbox()
+        cashBox = ui.vbox()
         settingsBox = ui.vbox()
         val content = FrameLayout(this)
-        pages = listOf(overviewBox, txBox, settingsBox).map { box ->
+        pages = listOf(overviewBox, txBox, cashBox, settingsBox).map { box ->
             box.setPadding(dp(16), dp(4), dp(16), dp(24))
             ScrollView(this).apply { addView(box) }.also { content.addView(it) }
         }
-        txBox.setPadding(dp(16), dp(4), dp(16), dp(96)) // chừa chỗ cho nút nổi
+        cashBox.setPadding(dp(16), dp(4), dp(16), dp(96)) // chừa chỗ cho nút nổi
         fab = ui.text("+", 30f, ui.onPrimary).apply {
             gravity = Gravity.CENTER
             background = ui.pressable(ui.primary, 28)
@@ -167,7 +169,7 @@ class MainActivity : Activity() {
             setBackgroundColor(ui.surface)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
-        listOf("Tổng quan", "Giao dịch", "Cài đặt").forEachIndexed { i, s ->
+        listOf("Tổng quan", "Giao dịch", "Tiền mặt", "Cài đặt").forEachIndexed { i, s ->
             val v = ui.text(s, 14f).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(10), 0, dp(10))
@@ -184,7 +186,7 @@ class MainActivity : Activity() {
 
     private fun selectTab(i: Int) {
         pages.forEachIndexed { j, p -> p.visibility = if (j == i) View.VISIBLE else View.GONE }
-        fab.visibility = if (i == 1) View.VISIBLE else View.GONE
+        fab.visibility = if (i == CASH_TAB) View.VISIBLE else View.GONE
         tabViews.forEachIndexed { j, v ->
             val on = j == i
             v.setTextColor(if (on) ui.primary else ui.muted)
@@ -220,6 +222,7 @@ class MainActivity : Activity() {
     private fun renderData() {
         renderOverview()
         renderTransactions()
+        renderCash()
     }
 
     /** Đổi tag không làm đổi dataKey → ép đọc lại sổ. */
@@ -571,7 +574,7 @@ class MainActivity : Activity() {
         val quick = LinearLayout(this)
         for (v in QUICK_AMOUNTS) {
             quick.addView(
-                ui.chip(short(v), false) { amount.setText(v.toString()) },
+                ui.chip(ui.short(v), false) { amount.setText(v.toString()) },
                 LinearLayout.LayoutParams(WRAP, WRAP).apply { if (quick.childCount > 0) marginStart = dp(6) },
             )
         }
@@ -645,7 +648,7 @@ class MainActivity : Activity() {
 
         for (m in templates) {
             tplRow.addView(
-                ui.chip("${m.description} · ${short(m.amount)}", false) {
+                ui.chip("${m.description} · ${ui.short(m.amount)}", false) {
                     isIn = m.isIn
                     fillDir()
                     amount.setText(m.amount.toString())
@@ -670,16 +673,6 @@ class MainActivity : Activity() {
             reload()
         }, 20)
         showSheet(dialog, box)
-    }
-
-    /** 30000 → "30k", 1500000 → "1,5tr". */
-    private fun short(n: Long): String = when {
-        n >= 1_000_000 && n % 100_000 == 0L -> {
-            val d = n / 100_000
-            if (d % 10 == 0L) "${d / 10}tr" else "${d / 10},${d % 10}tr"
-        }
-        n % 1000 == 0L -> "${n / 1000}k"
-        else -> groupFmt.format(n)
     }
 
     /** Khung bottom sheet có thanh kéo; thêm nội dung rồi gọi [showSheet]. */
@@ -757,6 +750,7 @@ class MainActivity : Activity() {
         }, 8)
 
         val list = ledger.inMonth(month).filter {
+            if (it.manual) return@filter false
             val dirOk = when (filter) {
                 Filter.ALL -> true
                 Filter.IN -> it.isIn
@@ -772,17 +766,7 @@ class MainActivity : Activity() {
         if (list.isEmpty()) {
             ui.add(box, ui.card().apply { addView(ui.text("Không có giao dịch phù hợp trong tháng này.", 14f, ui.muted)) })
         }
-        for ((day, items) in list.groupBy { it.date }) {
-            val net = items.sumOf { if (it.isIn) it.amount else -it.amount }
-            val head = ui.split(
-                ui.text(dayFmt.format(day).replaceFirstChar { it.uppercase() }, 13f, ui.muted, bold = true),
-                ui.text(ui.money(net, signed = true), 13f, ui.muted),
-            ).apply { setPadding(dp(4), 0, dp(4), 0) }
-            ui.add(box, head, 16)
-            val c = ui.card().apply { setPadding(dp(16), dp(2), dp(16), dp(2)) }
-            txList(c, items, clockFmt)
-            ui.add(box, c, 6)
-        }
+        dayGroups(box, list)
 
         val unparsed = ledger.unparsed.filter { Ledger.monthOf(it.postedAt) == month }
         if (unparsed.isNotEmpty()) {
@@ -800,6 +784,49 @@ class MainActivity : Activity() {
             }
             ui.add(box, c, 20)
         }
+    }
+
+    /** Danh sách giao dịch nhóm theo ngày, mỗi ngày kèm tổng vào − ra. */
+    private fun dayGroups(box: LinearLayout, list: List<Tx>) {
+        for ((day, items) in list.groupBy { it.date }) {
+            val net = items.sumOf { if (it.isIn) it.amount else -it.amount }
+            val head = ui.split(
+                ui.text(dayFmt.format(day).replaceFirstChar { it.uppercase() }, 13f, ui.muted, bold = true),
+                ui.text(ui.money(net, signed = true), 13f, ui.muted),
+            ).apply { setPadding(dp(4), 0, dp(4), 0) }
+            ui.add(box, head, 16)
+            val c = ui.card().apply { setPadding(dp(16), dp(2), dp(16), dp(2)) }
+            txList(c, items, clockFmt)
+            ui.add(box, c, 6)
+        }
+    }
+
+    // ------------------------------------------------------------------ tab Tiền mặt
+
+    /** Giao dịch nhập tay: tiền mặt hiện có (mọi thời gian), vào/ra và danh sách của tháng đang xem. */
+    private fun renderCash() {
+        val box = cashBox
+        box.removeAllViews()
+        ui.add(box, monthSwitcher(), 4)
+
+        val hero = ui.card(radius = 22, color = ui.primary).apply { setPadding(dp(20), dp(18), dp(20), dp(18)) }
+        hero.addView(ui.text("Tiền mặt hiện có", 13f, ui.onPrimary).apply { alpha = 0.8f })
+        hero.addView(ui.text(ui.money(ledger.cashBalance), 30f, ui.onPrimary, bold = true))
+        ui.add(box, hero)
+
+        val list = ledger.inMonth(month).filter { it.manual }
+        val (ins, outs) = list.partition { it.isIn }
+        ui.add(box, ui.row(
+            kpi("Tiền vào", ins.sumOf { it.amount }, ins.size, ui.green),
+            kpi("Tiền ra", outs.sumOf { it.amount }, outs.size, ui.red),
+            gap = 12,
+        ))
+        if (list.isEmpty()) {
+            ui.add(box, ui.card().apply {
+                addView(ui.text("Chưa có giao dịch tiền mặt trong tháng này. Bấm + để thêm.", 14f, ui.muted))
+            })
+        }
+        dayGroups(box, list)
     }
 
     // ------------------------------------------------------------------ tab Cài đặt
@@ -1059,6 +1086,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val UNTAGGED = -1L
+        private const val CASH_TAB = 2
         private val QUICK_AMOUNTS = listOf(20_000L, 50_000L, 100_000L, 200_000L, 500_000L)
     }
 }

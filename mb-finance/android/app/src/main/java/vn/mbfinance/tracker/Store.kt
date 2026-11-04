@@ -35,7 +35,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     private data class Link(val id: Long, val amount: Long, val balance: Long, val text: String)
 
     /** Số liệu cho widget, tính bằng SQL thay vì đọc hết bảng transactions. */
-    data class Brief(val totalIn: Long, val totalOut: Long, val balance: Long?, val lastTxTime: Long?) {
+    /** [balance] = số dư ngân hàng, [cash] = tiền mặt (null nếu chưa nhập tay giao dịch nào). */
+    data class Brief(val totalIn: Long, val totalOut: Long, val balance: Long?, val lastTxTime: Long?, val cash: Long?) {
         val net get() = totalIn - totalOut
     }
 
@@ -400,10 +401,18 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             """.trimIndent(),
             arrayOf(pkg),
         ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+        val cash = db.rawQuery(
+            """
+            SELECT SUM(CASE t.direction WHEN 'in' THEN t.amount ELSE -t.amount END)
+            FROM transactions t JOIN queue q ON q.id = t.queue_id WHERE q.package = '$MANUAL'
+            """.trimIndent(),
+            null,
+        ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
         return Brief(
             totalIn, totalOut,
             balance = latest("t.balance_after", "AND t.balance_after IS NOT NULL"),
             lastTxTime = latest("t.tx_time", ""),
+            cash = cash,
         )
     }
 
