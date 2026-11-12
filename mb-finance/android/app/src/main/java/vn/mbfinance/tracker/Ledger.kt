@@ -40,6 +40,7 @@ class Ledger(
     val unparsed: List<Store.Item>,
     val checks: Map<YearMonth, List<Store.MonthCheck>> = emptyMap(), // đối soát số dư theo tháng, mỗi TK 1 dòng
     val plans: List<Plan> = emptyList(), // đang mở trước, mới tạo trước
+    private val dismissed: Set<Pair<Long, Long>> = emptySet(), // (tx, khoản cọc) đã bấm "Không phải"
 ) {
 
     data class MonthSum(
@@ -93,6 +94,28 @@ class Ledger(
     /** Đã trả / đã để dành cho [p]: tổng tiền ra đã gắn, không tính phí. */
     fun paid(p: Plan): Long = txsOf(p).filter { !it.isIn }.sumOf { it.amount - it.fee }
 
+    /** Giao dịch cọc = lần trả đầu tiên của mỗi khoản cọc; các lần sau là "trả". */
+    val depositIds: Set<Long> = plans.filter { !it.saving }.mapNotNull { p -> txsOf(p).minByOrNull { it.time }?.id }.toSet()
+
+    /**
+     * Gợi ý trả nốt: tiền ra chưa gắn khoản, sau lần cọc, đúng bằng số còn phải trả của 1 khoản cọc đang mở
+     * (trừ cặp người dùng đã bấm "Không phải"). tx id → khoản.
+     */
+    val suggestions: Map<Long, Plan> = buildMap {
+        for (p in plans) {
+            if (p.saving || p.done) continue
+            val linked = txsOf(p)
+            val since = linked.minOfOrNull { it.time } ?: continue
+            val left = p.target - paid(p)
+            if (left <= 0) continue
+            for (t in txs) {
+                if (t.isIn || t.plan != null || t.time <= since || t.amount - t.fee != left) continue
+                if ((t.id to p.id) in dismissed || containsKey(t.id)) continue
+                put(t.id, p)
+            }
+        }
+    }
+
     /** Tổng tiền vào ([isIn]) hoặc ra theo tag trong tháng, lớn nhất trước; tag null = chưa gắn. */
     fun byTag(m: YearMonth, isIn: Boolean): List<Pair<Tag?, Long>> =
         spending(m).filter { it.isIn == isIn }
@@ -135,6 +158,7 @@ class Ledger(
                 store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) },
                 store.monthChecks(pkg),
                 store.plans(),
+                store.dismissed(),
             )
         }
     }

@@ -16,7 +16,7 @@ import java.util.UUID
  * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
  * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 6) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 7) {
 
     /** Tăng khi dữ liệu đổi mà số dòng queue không đổi (thay nội dung, tính lại) → [dataKey] đổi. */
     @Volatile
@@ -81,6 +81,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         createTags(db)
         createBalanceCheck(db)
         createPlans(db)
+        createPlanDismissed(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -91,6 +92,17 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         // v4 (dọn bản trùng) giờ do reparseAll làm khi Parser.VERSION tăng
         if (oldVersion < 5) createBalanceCheck(db)
         if (oldVersion < 6) createPlans(db)
+        if (oldVersion < 7) {
+            createPlanDismissed(db)
+            OLD_TAG_COLORS.forEachIndexed { i, old ->
+                db.execSQL("UPDATE tags SET color = ? WHERE color = ?", arrayOf<Any>(TAG_COLORS[i], old))
+            }
+        }
+    }
+
+    /** v7: gợi ý "trả nốt khoản cọc" người dùng đã bấm "Không phải" → không hỏi lại. */
+    private fun createPlanDismissed(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE plan_dismissed (queue_id INTEGER NOT NULL, plan_id INTEGER NOT NULL, PRIMARY KEY (queue_id, plan_id))")
     }
 
     /** v6 khoản lớn: plans (cọc/trả dần hoặc mục tiêu tiết kiệm), plan_tx gắn giao dịch theo queue_id như tag. */
@@ -284,7 +296,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         try {
             val at = position(db, queueId)
             db.execSQL("UPDATE queue SET status = '$DELETED' WHERE id = ?", args)
-            for (table in listOf("transactions", "tx_tags", "confirmed_fees", "plan_tx")) db.delete(table, "queue_id = ?", args)
+            for (table in listOf("transactions", "tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed")) db.delete(table, "queue_id = ?", args)
             // Giao dịch sau nó đổi số dư liền trước → đối soát lại
             if (at != null) resettle(db, at.first, at.second)
             db.setTransactionSuccessful()
@@ -462,7 +474,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                     "INSERT OR IGNORE INTO plan_tx(queue_id, plan_id) SELECT ?, plan_id FROM plan_tx WHERE queue_id = ?",
                     arrayOf<Any>(keep.id, r.seen.id),
                 )
-                for (table in listOf("tx_tags", "confirmed_fees", "plan_tx", "transactions")) db.delete(table, "queue_id = ?", args)
+                for (table in listOf("tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed", "transactions")) db.delete(table, "queue_id = ?", args)
                 db.delete("queue", "id = ?", args)
                 removed++
                 if (richer(r.seen, best)) kept[i] = keep to r.seen
@@ -840,7 +852,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("plan_tx", "plan_id = ?", arrayOf(id.toString()))
+            for (table in listOf("plan_tx", "plan_dismissed")) db.delete(table, "plan_id = ?", arrayOf(id.toString()))
             db.delete("plans", "id = ?", arrayOf(id.toString()))
             db.setTransactionSuccessful()
             revision++
@@ -849,15 +861,38 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         }
     }
 
-    /** Gắn giao dịch [queueId] vào khoản [planId]; null = gỡ. */
+    /** Gắn giao dịch [queueId] vào khoản [planId] (null = gỡ); khoản cọc trả đủ tổng giá thì tự hoàn tất. */
     fun setPlan(queueId: Long, planId: Long?) {
         val db = writableDatabase
         if (planId == null) {
             db.delete("plan_tx", "queue_id = ?", arrayOf(queueId.toString()))
         } else {
             db.execSQL("INSERT OR REPLACE INTO plan_tx(queue_id, plan_id) VALUES (?, ?)", arrayOf<Any>(queueId, planId))
+            db.execSQL(
+                """
+                UPDATE plans SET done = 1 WHERE id = ? AND kind = '$PAY' AND target <= (
+                  SELECT COALESCE(SUM(t.amount - t.fee), 0) FROM plan_tx pt JOIN transactions t ON t.queue_id = pt.queue_id
+                  WHERE pt.plan_id = ? AND t.direction = 'out'
+                )
+                """.trimIndent(),
+                arrayOf<Any>(planId, planId),
+            )
         }
         revision++
+    }
+
+    /** Người dùng xác nhận giao dịch [queueId] không phải lần trả nốt khoản cọc [planId]. */
+    fun dismissSuggestion(queueId: Long, planId: Long) {
+        writableDatabase.execSQL("INSERT OR IGNORE INTO plan_dismissed(queue_id, plan_id) VALUES (?, ?)", arrayOf<Any>(queueId, planId))
+        revision++
+    }
+
+    /** Các cặp (queue_id, plan_id) đã bấm "Không phải". */
+    fun dismissed(): Set<Pair<Long, Long>> {
+        val out = HashSet<Pair<Long, Long>>()
+        readableDatabase.rawQuery("SELECT queue_id, plan_id FROM plan_dismissed", null)
+            .use { c -> while (c.moveToNext()) out.add(c.getLong(0) to c.getLong(1)) }
+        return out
     }
 
     // ------------------------------------------------------------------ tag
@@ -944,8 +979,13 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
         private val DEFAULT_TAGS = listOf("Ăn uống", "Đi lại", "Mua sắm", "Hoá đơn", "Nhà cửa", "Lương", "Chuyển khoản", "Khác")
 
-        /** Đủ tương phản trên cả nền sáng và tối. */
+        /** Bảng màu tag (đã kiểm tra tương phản/mù màu trên nền sáng và tối); xám dành cho "chưa gắn tag". */
         val TAG_COLORS = listOf(
+            0xFFEA580C, 0xFF0284C7, 0xFFDB2777, 0xFFA16207, 0xFF7C3AED, 0xFF16A34A, 0xFF4F46E5, 0xFF0D9488, 0xFFDC2626,
+        ).map { it.toInt() }
+
+        /** Bảng màu tag trước v7, cùng thứ tự với [TAG_COLORS] → đổi màu tag cũ khi nâng cấp. */
+        private val OLD_TAG_COLORS = listOf(
             0xFFF97316, 0xFF0EA5E9, 0xFFEC4899, 0xFFEAB308, 0xFF8B5CF6, 0xFF22C55E, 0xFF64748B, 0xFF14B8A6, 0xFFEF4444,
         ).map { it.toInt() }
 

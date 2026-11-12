@@ -14,6 +14,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.text.SpannableString
 import android.text.SpannableStringBuilder
+import android.text.TextPaint
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
@@ -468,6 +469,89 @@ class MonthBars(
             val i = (e.x / (width.toFloat() / data.size)).toInt().coerceIn(0, data.size - 1)
             onPick(data[i].month)
         }
+        return true
+    }
+}
+
+/**
+ * Biểu đồ vành khuyên: mỗi phần 1 màu cố định theo thực thể, khe 2dp giữa các phần.
+ * Chạm 1 phần để chọn (giữa vành hiện tên, số tiền, %), chạm lại hoặc chạm giữa để bỏ chọn; [onSelect] nhận index (-1 = bỏ).
+ */
+class DonutChart(
+    ctx: Context,
+    private val ui: Ui,
+    private val parts: List<Part>,
+    private val title: String,
+) : View(ctx) {
+
+    data class Part(val label: String, val value: Long, val color: Int)
+
+    var onSelect: ((Int) -> Unit)? = null
+    private var selected = -1
+    private val total = max(1L, parts.sumOf { it.value })
+    private val stroke = ui.dp(22).toFloat()
+    private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val small = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = ui.dp(12).toFloat()
+        textAlign = Paint.Align.CENTER
+        color = ui.muted
+    }
+    private val big = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = ui.dp(20).toFloat()
+        textAlign = Paint.Align.CENTER
+        typeface = ui.medium
+        fontFeatureSettings = "tnum"
+        color = ui.fg
+    }
+    private val oval = RectF()
+    private var radius = 0f
+
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        setMeasuredDimension(MeasureSpec.getSize(widthSpec), ui.dp(188))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val cx = width / 2f
+        val cy = height / 2f
+        // Chừa chỗ cho phần đang chọn dày hơn
+        radius = min(width, height) / 2f - stroke / 2 - ui.dp(5)
+        oval.set(cx - radius, cy - radius, cx + radius, cy + radius)
+        val gap = if (parts.size > 1) Math.toDegrees(ui.dp(2) / radius.toDouble()).toFloat() else 0f
+        var start = -90f
+        parts.forEachIndexed { i, p ->
+            val sweep = 360f * p.value / total
+            arc.color = p.color
+            arc.alpha = if (selected < 0 || selected == i) 255 else 70
+            arc.strokeWidth = if (selected == i) stroke + ui.dp(6) else stroke
+            canvas.drawArc(oval, start + gap / 2, max(0.5f, sweep - gap), false, arc)
+            start += sweep
+        }
+
+        val inner = (radius - stroke) * 2 - ui.dp(8)
+        val p = parts.getOrNull(selected)
+        val label = p?.label ?: title
+        val value = p?.value ?: total
+        canvas.drawText(TextUtils.ellipsize(label, small, inner, TextUtils.TruncateAt.END).toString(), cx, cy - ui.dp(14), small)
+        canvas.drawText(ui.short(value), cx, cy + ui.dp(8), big)
+        if (p != null) canvas.drawText("${p.value * 100 / total}%", cx, cy + ui.dp(28), small)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (e.action != MotionEvent.ACTION_UP) return true
+        val dx = e.x - width / 2f
+        val dy = e.y - height / 2f
+        val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+        // Chạm giữa hoặc ngoài vành → bỏ chọn; vùng chạm rộng hơn nét vẽ
+        val hit = if (dist < radius - stroke || dist > radius + stroke) -1 else {
+            // Góc tính từ 12 giờ theo chiều kim đồng hồ, giống thứ tự vẽ
+            val deg = ((Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble()) + 90 + 360) % 360).toFloat()
+            var acc = 0f
+            parts.indexOfFirst { acc += 360f * it.value / total; deg < acc }
+        }
+        selected = if (hit == selected) -1 else hit
+        invalidate()
+        onSelect?.invoke(selected)
         return true
     }
 }
