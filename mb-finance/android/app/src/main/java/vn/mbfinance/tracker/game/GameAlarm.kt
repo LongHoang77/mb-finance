@@ -24,7 +24,7 @@ class GameAlarm : BroadcastReceiver() {
         )
 
         /** Đặt lại báo thức theo snapshot mới; đã tới ngưỡng thì nhắc ngay (1 lần cho mỗi lần đầy). */
-        fun schedule(ctx: Context, s: GameStore) {
+        internal fun schedule(ctx: Context, s: GameStore) {
             val am = ctx.getSystemService(AlarmManager::class.java) ?: return
             am.cancel(intent(ctx))
             val full = s.fullAt ?: return
