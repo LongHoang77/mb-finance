@@ -25,17 +25,19 @@ class GameJob : JobService() {
         private const val ID = 7001
         private const val PERIOD = 3 * 60 * 60_000L
 
-        /** Đặt lịch nếu chưa có (đặt lại mỗi lần sẽ làm lùi chu kỳ). */
+        /** Đặt lịch nếu chưa có (đặt lại mỗi lần sẽ làm lùi chu kỳ). Hệ thống từ chối thì bỏ qua, không làm crash app. */
         fun ensure(ctx: Context) {
-            val js = ctx.getSystemService(JobScheduler::class.java) ?: return
-            if (js.getPendingJob(ID) != null) return
-            js.schedule(
-                JobInfo.Builder(ID, ComponentName(ctx, GameJob::class.java))
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setPeriodic(PERIOD)
-                    .setPersisted(true)
-                    .build()
-            )
+            runCatching {
+                val js = ctx.getSystemService(JobScheduler::class.java) ?: return
+                if (js.getPendingJob(ID) != null) return
+                js.schedule(
+                    JobInfo.Builder(ID, ComponentName(ctx, GameJob::class.java))
+                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                        .setPeriodic(PERIOD)
+                        .setPersisted(true)
+                        .build()
+                )
+            }
         }
 
         fun cancel(ctx: Context) {

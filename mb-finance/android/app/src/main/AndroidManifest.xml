@@ -5,6 +5,8 @@
 
     <!-- Chỉ module Game dùng mạng (HoYoLAB, xem game/Net.kt); module tài chính không gọi mạng -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Bắt buộc cho JobScheduler có điều kiện "có mạng" (GameJob) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Giữ lịch tự điểm danh (GameJob) sau khi khởi động lại máy -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
