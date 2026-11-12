@@ -135,7 +135,7 @@ class BalanceWidget : AppWidgetProvider() {
             syncing -> "Đang quét…" to false
             !MbNotificationListener.isEnabled(ctx) -> "Chưa cấp quyền" to true
             MbNotificationListener.instance == null -> "Mất kết nối" to true
-            else -> "✓ ${clockFmt.format(Instant.now())}" to false
+            else -> "Cập nhật ${clockFmt.format(Instant.now())}" to false
         }
     }
 }

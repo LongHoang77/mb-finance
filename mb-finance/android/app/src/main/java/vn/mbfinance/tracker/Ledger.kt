@@ -19,13 +19,20 @@ data class Tx(
     val timeFromText: Boolean,
     val tag: Tag?,
     val manual: Boolean = false, // nhập tay (tiền mặt…), không từ thông báo MB
+    val gap: Long? = null, // lệch số dư so với giao dịch liền trước (> 0: thiếu, < 0: thừa), xem Store.settle
+    val feeConfirmed: Boolean = false, // người dùng đã xác nhận khoản lệch là phí
+    val fee: Long = 0, // phần phí/VAT đã cộng vào amount
 )
 
 /** Tag thu chi do người dùng tự đặt; [color] là ARGB. */
 data class Tag(val id: Long, val name: String, val color: Int)
 
 /** Sổ giao dịch đọc từ bảng transactions trên máy (không cần server). */
-class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
+class Ledger(
+    val txs: List<Tx>,
+    val unparsed: List<Store.Item>,
+    val checks: Map<YearMonth, List<Store.MonthCheck>> = emptyMap(), // đối soát số dư theo tháng, mỗi TK 1 dòng
+) {
 
     data class MonthSum(
         val month: YearMonth,
@@ -102,7 +109,11 @@ class Ledger(val txs: List<Tx>, val unparsed: List<Store.Item>) {
             val store = Store.get(ctx)
             val pkg = Settings(ctx).mbPackage
             // Bỏ OTP/quảng cáo đã lưu từ bản cũ, chỉ giữ mẫu giao dịch parser chưa đọc được
-            return Ledger(store.transactions(pkg), store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) })
+            return Ledger(
+                store.transactions(pkg),
+                store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) },
+                store.monthChecks(pkg),
+            )
         }
     }
 }

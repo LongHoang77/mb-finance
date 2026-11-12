@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="w_bg">#F21A1D23</color>
-    <color name="w_fg">#E8EAED</color>
-    <color name="w_muted">#9AA0A6</color>
-    <color name="w_green">#4ADE80</color>
-    <color name="w_red">#F87171</color>
-    <color name="w_warn">#FCD34D</color>
-    <color name="w_green_soft">#264ADE80</color>
-    <color name="w_red_soft">#26F87171</color>
-    <color name="w_btn">#1FE8EAED</color>
-    <color name="w_ripple">#33E8EAED</color>
+    <color name="w_bg_start">#2563EB</color>
+    <color name="w_bg_end">#172554</color>
+    <color name="w_fg">#FFFFFF</color>
+    <color name="w_muted">#C7D2FE</color>
+    <color name="w_green">#A7F3D0</color>
+    <color name="w_red">#FECDD3</color>
+    <color name="w_warn">#FDE68A</color>
+    <color name="w_green_soft">#26FFFFFF</color>
+    <color name="w_red_soft">#26FFFFFF</color>
+    <color name="w_btn">#26FFFFFF</color>
+    <color name="w_ripple">#40FFFFFF</color>
 </resources>

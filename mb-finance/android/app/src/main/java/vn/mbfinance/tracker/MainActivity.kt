@@ -6,6 +6,7 @@ import android.app.DatePickerDialog
 import android.app.Dialog
 import android.app.TimePickerDialog
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -18,14 +19,18 @@ import android.provider.Settings as AndroidSettings
 import android.text.Editable
 import android.text.InputType
 import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -57,7 +62,9 @@ class MainActivity : Activity() {
     private lateinit var cashBox: LinearLayout
     private lateinit var settingsBox: LinearLayout
     private lateinit var fab: View
-    private val tabViews = ArrayList<TextView>()
+    private class NavItem(val pill: View, val icon: ImageView, val label: TextView)
+
+    private val tabViews = ArrayList<NavItem>()
 
     private lateinit var permText: TextView
     private lateinit var permButton: View
@@ -68,6 +75,7 @@ class MainActivity : Activity() {
     private lateinit var scanText: TextView
     private lateinit var recentBox: LinearLayout
     private lateinit var tagsBox: Flow
+    private lateinit var marksBox: LinearLayout
     private var lastSourcesKey = ""
     private var lastRecentKey = ""
 
@@ -114,9 +122,9 @@ class MainActivity : Activity() {
             fitsSystemWindows = true
             setBackgroundColor(ui.bg)
         }
-        val header = ui.vbox().apply { setPadding(dp(20), dp(14), dp(20), dp(2)) }
-        header.addView(ui.text("Thu chi MB", 24f, bold = true))
-        headerStatus = ui.text("", 13f, ui.muted).also { header.addView(it) }
+        val header = ui.vbox().apply { setPadding(dp(20), dp(16), dp(20), dp(6)) }
+        header.addView(ui.text("Thu chi MB", 26f, bold = true).apply { letterSpacing = -0.02f })
+        headerStatus = ui.text("", 13f, ui.muted).also { ui.add(header, it, 4) }
         shell.addView(header)
 
         overviewBox = ui.vbox()
@@ -125,18 +133,24 @@ class MainActivity : Activity() {
         settingsBox = ui.vbox()
         val content = FrameLayout(this)
         pages = listOf(overviewBox, txBox, cashBox, settingsBox).map { box ->
-            box.setPadding(dp(16), dp(4), dp(16), dp(24))
-            ScrollView(this).apply { addView(box) }.also { content.addView(it) }
+            box.setPadding(dp(16), dp(4), dp(16), dp(28))
+            ScrollView(this).apply {
+                isVerticalScrollBarEnabled = false
+                addView(box)
+            }.also { content.addView(it) }
         }
-        cashBox.setPadding(dp(16), dp(4), dp(16), dp(96)) // chừa chỗ cho nút nổi
-        fab = ui.text("+", 30f, ui.onPrimary).apply {
-            gravity = Gravity.CENTER
-            background = ui.pressable(ui.primary, 28)
+        cashBox.setPadding(dp(16), dp(4), dp(16), dp(104)) // chừa chỗ cho nút nổi
+        fab = ImageView(this).apply {
+            setImageResource(R.drawable.ic_add)
+            imageTintList = ColorStateList.valueOf(ui.onPrimary)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = ui.pressable(ui.primary, 20)
             elevation = dp(6).toFloat()
             contentDescription = "Thêm giao dịch"
             setOnClickListener { showManualForm(null) }
         }
-        content.addView(fab, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
+        content.addView(fab, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.END).apply {
             setMargins(0, 0, dp(20), dp(20))
         })
         shell.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -163,20 +177,32 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ khung + tab
 
+    /** Thanh tab dưới: icon trong viên nền (tab đang chọn) + nhãn. */
     private fun bottomNav(): View {
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(ui.surface)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(8), dp(10), dp(8), dp(12))
         }
-        listOf("Tổng quan", "Giao dịch", "Tiền mặt", "Cài đặt").forEachIndexed { i, s ->
-            val v = ui.text(s, 14f).apply {
-                gravity = Gravity.CENTER
-                setPadding(0, dp(10), 0, dp(10))
+        listOf(
+            "Tổng quan" to R.drawable.ic_home,
+            "Giao dịch" to R.drawable.ic_list,
+            "Tiền mặt" to R.drawable.ic_wallet,
+            "Cài đặt" to R.drawable.ic_settings,
+        ).forEachIndexed { i, (s, res) ->
+            val icon = ui.icon(res, ui.muted, 22)
+            val pill = FrameLayout(this).apply {
+                addView(icon, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+            }
+            val label = ui.text(s, 12f, ui.muted).apply { gravity = Gravity.CENTER }
+            val item = ui.vbox().apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(pill, LinearLayout.LayoutParams(dp(60), dp(32)))
+                addView(label, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(4) })
                 setOnClickListener { selectTab(i) }
             }
-            tabViews.add(v)
-            nav.addView(v, LinearLayout.LayoutParams(0, WRAP, 1f).apply { if (i > 0) marginStart = dp(8) })
+            tabViews.add(NavItem(pill, icon, label))
+            nav.addView(item, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
         return ui.vbox().apply {
             addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1))
@@ -189,9 +215,10 @@ class MainActivity : Activity() {
         fab.visibility = if (i == CASH_TAB) View.VISIBLE else View.GONE
         tabViews.forEachIndexed { j, v ->
             val on = j == i
-            v.setTextColor(if (on) ui.primary else ui.muted)
-            v.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-            v.background = if (on) ui.rounded(ui.primarySoft, 14) else null
+            v.pill.background = if (on) ui.rounded(ui.primarySoft, 16) else null
+            v.icon.imageTintList = ColorStateList.valueOf(if (on) ui.primary else ui.muted)
+            v.label.setTextColor(if (on) ui.fg else ui.muted)
+            v.label.typeface = if (on) ui.medium else Typeface.DEFAULT
         }
     }
 
@@ -223,6 +250,7 @@ class MainActivity : Activity() {
         renderOverview()
         renderTransactions()
         renderCash()
+        renderMarks() // lệch của mốc đổi khi có giao dịch đến trễ
     }
 
     /** Đổi tag không làm đổi dataKey → ép đọc lại sổ. */
@@ -239,39 +267,45 @@ class MainActivity : Activity() {
         ui.add(box, monthSwitcher(), 4)
         val s = ledger.sum(month)
 
-        val hero = ui.card(radius = 22, color = ui.primary).apply { setPadding(dp(20), dp(18), dp(20), dp(18)) }
-        hero.addView(ui.text("Chênh lệch thu − chi", 13f, ui.onPrimary).apply { alpha = 0.8f })
-        hero.addView(ui.text(ui.money(s.net, signed = true), 30f, ui.onPrimary, bold = true))
-        ui.add(box, hero)
-
-        // Số dư hiện tại (không theo tháng): ngân hàng = SD thông báo MB mới nhất, tiền mặt = giao dịch tay
+        // Thẻ chính: số dư hiện tại (không theo tháng) + chênh lệch tháng đang xem
         val bank = ledger.latestBalance
+        val hero = ui.hero()
+        val onHero = ui.onHero
+        fun faded(v: TextView) = v.apply { alpha = 0.78f }
         if (bank != null || ledger.hasCash) {
-            val c = ui.card()
-            c.addView(ui.text("Tổng số dư", 13f, ui.muted))
-            c.addView(ui.text(ui.money((bank ?: 0) + ledger.cashBalance), 22f, bold = true))
-            fun part(label: String, value: String) = ui.vbox().apply {
-                addView(ui.text(label, 12f, ui.muted))
-                addView(ui.text(value, 15f, bold = true))
+            hero.addView(faded(ui.text("Tổng số dư", 13f, onHero)))
+            ui.add(hero, ui.amount((bank ?: 0) + ledger.cashBalance, 32f, onHero), 6)
+            fun part(res: Int, label: String, value: String) = ui.vbox().apply {
+                addView(faded(ui.text(ui.iconText(res, label, onHero, 14), 12f, onHero)))
+                ui.add(this, ui.text(value, 15f, onHero, bold = true).apply { fontFeatureSettings = "tnum" }, 4)
             }
-            ui.add(c, ui.row(
-                part("Ngân hàng", bank?.let { ui.money(it) } ?: "—"),
-                part("Tiền mặt", ui.money(ledger.cashBalance)),
+            ui.add(hero, ui.row(
+                part(R.drawable.ic_bank, "Ngân hàng", bank?.let { ui.money(it) } ?: "—"),
+                part(R.drawable.ic_wallet, "Tiền mặt", ui.money(ledger.cashBalance)),
                 gap = 12,
-            ), 10)
-            ui.add(box, c)
+            ), 16)
+            ui.add(hero, View(this).apply { setBackgroundColor(0x33FFFFFF) }.also { it.minimumHeight = 1 }, 16)
+            ui.add(hero, ui.split(
+                faded(ui.text("Chênh lệch tháng ${month.monthValue}", 13f, onHero)),
+                ui.amount(s.net, 16f, onHero, signed = true),
+            ), 14)
+        } else {
+            hero.addView(faded(ui.text("Chênh lệch thu − chi tháng ${month.monthValue}", 13f, onHero)))
+            ui.add(hero, ui.amount(s.net, 32f, onHero, signed = true), 6)
         }
+        ui.add(box, hero, 8)
 
         ui.add(box, ui.row(
-            kpi("Tiền vào", s.totalIn, s.countIn, ui.green),
-            kpi("Tiền ra", s.totalOut, s.countOut, ui.red),
+            kpi(R.drawable.ic_arrow_down, "Tiền vào", s.totalIn, s.countIn, ui.green),
+            kpi(R.drawable.ic_arrow_up, "Tiền ra", s.totalOut, s.countOut, ui.red),
             gap = 12,
         ))
+        ledger.checks[month]?.let { ui.add(box, monthCheckCard(it)) }
 
         val now = YearMonth.now(Ledger.VN)
         val end = if (month < now.minusMonths(5)) month else now
         val chart = ui.card()
-        chart.addView(ui.split(ui.text("6 tháng", 15f, bold = true), legend()))
+        chart.addView(ui.split(ui.text("6 tháng gần đây", 16f, bold = true), legend()))
         chart.addView(
             MonthBars(this, ui, ledger.lastMonths(end, 6), month) { month = it; renderData() },
             LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
@@ -282,54 +316,114 @@ class MainActivity : Activity() {
 
         val top = ledger.inMonth(month).filter { !it.isIn }.sortedByDescending { it.amount }.take(5)
         if (top.isNotEmpty()) {
-            val c = ui.card()
-            c.addView(ui.text("Chi nhiều nhất tháng ${month.monthValue}", 15f, bold = true))
+            val c = listCard()
+            c.addView(ui.header("Chi nhiều nhất tháng ${month.monthValue}").apply { setPadding(0, 0, 0, dp(4)) })
             txList(c, top, timeFmt)
             ui.add(box, c)
         }
 
-        val recent = ui.card()
-        recent.addView(ui.text("Giao dịch gần đây", 15f, bold = true))
+        val recent = listCard()
+        recent.addView(ui.header("Giao dịch gần đây", if (ledger.txs.isEmpty()) null else "Xem tất cả") { selectTab(1) }
+            .apply { setPadding(0, 0, 0, dp(4)) })
         if (ledger.txs.isEmpty()) {
-            recent.addView(ui.text(
-                "Chưa có giao dịch. Khi MB Bank báo biến động số dư, giao dịch sẽ hiện ở đây.",
-                14f, ui.muted,
-            ).apply { setPadding(0, dp(8), 0, 0) })
+            ui.add(recent, empty(R.drawable.ic_bell, "Chưa có giao dịch. Khi MB Bank báo biến động số dư, giao dịch sẽ hiện ở đây."), 8)
         } else {
             txList(recent, ledger.txs.take(5), timeFmt)
-            ui.add(recent, ui.button("Xem tất cả giao dịch", filled = false) { selectTab(1) }, 8)
         }
         ui.add(box, recent)
+    }
+
+    /** Card chứa danh sách dòng giao dịch (lề dọc nhỏ hơn card thường vì mỗi dòng đã có padding). */
+    private fun listCard() = ui.card().apply { setPadding(dp(16), dp(14), dp(16), dp(6)) }
+
+    /** Trạng thái trống: icon tròn + lời nhắc. */
+    private fun empty(res: Int, msg: String) = ui.vbox().apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(0, dp(12), 0, dp(16))
+        addView(ui.iconCircle(res, ui.muted, 48))
+        ui.add(this, ui.text(msg, 14f, ui.muted).apply { gravity = Gravity.CENTER }, 10)
+    }
+
+    /** Đối soát số dư tháng đang xem cho từng TK: đầu tháng + vào − ra so với số dư cuối theo MB. */
+    private fun monthCheckCard(checks: List<Store.MonthCheck>): View {
+        val c = ui.card()
+        c.addView(ui.listRow(ui.iconCircle(R.drawable.ic_shield, ui.primary, 36), ui.text("Đối soát số dư", 16f, bold = true), null))
+        for (k in checks) {
+            if (checks.size > 1) ui.add(c, ui.text("TK ${k.account}", 13f, ui.muted, bold = true), 14)
+            val table = ui.card(radius = 14, color = ui.surface2).apply { setPadding(dp(14), dp(4), dp(14), dp(12)) }
+            fun line(label: String, value: String, strong: Boolean = false) = ui.add(table, ui.split(
+                ui.text(label, 13f, if (strong) ui.fg else ui.muted, bold = strong),
+                ui.text(value, 13f, bold = strong).apply { fontFeatureSettings = "tnum" },
+            ), 8)
+            line("Số dư đầu tháng", k.opening?.let { ui.money(it) } ?: "—")
+            line("+ Tiền vào", ui.money(k.totalIn))
+            line("− Tiền ra" + if (k.fees > 0) " (gồm phí ${ui.short(k.fees)})" else "", ui.money(k.totalOut))
+            k.opening?.let { line("Số dư cuối tính ra", ui.money(it + k.totalIn - k.totalOut), strong = true) }
+            line("Số dư cuối theo MB", ui.money(k.closing), strong = true)
+            ui.add(c, table, 12)
+
+            val diff = k.diff
+            val gaps = ledger.inMonth(month).filter { it.gap != null && !it.manual && (it.account == k.account || it.account == null) }
+            val status = when {
+                diff == null -> ui.callout(
+                    R.drawable.ic_info, "Chưa có số dư trước tháng này để đối soát. Nhập số dư thực tế ở tab Cài đặt.", ui.primary,
+                )
+                diff == 0L && gaps.isEmpty() -> ui.callout(R.drawable.ic_check_circle, "Khớp: không trùng, không sót, phí đã đủ", ui.green)
+                else -> ui.callout(
+                    R.drawable.ic_warning,
+                    buildString {
+                        append(if (diff == 0L) "Tổng khớp nhưng" else "Lệch ${if (diff > 0) "thiếu" else "thừa"} ${ui.money(kotlin.math.abs(diff))}")
+                        append(
+                            if (gaps.isNotEmpty()) "${if (diff == 0L) "" else " ·"} ${gaps.size} giao dịch lệch số dư — chạm để xem"
+                            else " · có thể trùng/sót giao dịch không ghi số dư hoặc mốc số dư nhập chưa đúng"
+                        )
+                    },
+                    ui.warn,
+                ).apply {
+                    if (gaps.isNotEmpty()) setOnClickListener { showTxSheet("Giao dịch lệch số dư", gaps) }
+                }
+            }
+            ui.add(c, status, 10)
+        }
+        return c
+    }
+
+    /** Danh sách giao dịch dạng bottom sheet; chạm để xem chi tiết. */
+    private fun showTxSheet(title: String, list: List<Tx>) {
+        val dialog = Dialog(this)
+        val box = sheetBox()
+        ui.add(box, ui.text(title, 20f, bold = true), 16)
+        val c = ui.vbox().also { ui.add(box, it, 8) }
+        txList(c, list, timeFmt)
+        ui.add(box, ui.button("Đóng", filled = false) { dialog.dismiss() }, 16)
+        showSheet(dialog, box)
     }
 
     /** Tổng thu/chi tháng theo tag; chạm 1 dòng để xem các giao dịch của tag đó. */
     private fun tagBreakdown(): View {
         val c = ui.card()
-        val side = LinearLayout(this).apply {
-            addView(ui.tagChip("Chi", null, !tagIn) { tagIn = false; renderOverview() })
-            addView(
-                ui.tagChip("Thu", null, tagIn) { tagIn = true; renderOverview() },
-                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(6) },
-            )
-        }
-        c.addView(ui.split(ui.text("Theo tag", 15f, bold = true), side))
+        val side = ui.segmented(listOf("Chi", "Thu"), if (tagIn) 1 else 0) { tagIn = it == 1; renderOverview() }
+        c.addView(ui.split(ui.text("Theo tag", 16f, bold = true), side.apply { minimumWidth = dp(128) }))
         val rows = ledger.byTag(month, tagIn)
         if (rows.isEmpty()) {
-            ui.add(c, ui.text("Không có giao dịch ${if (tagIn) "vào" else "ra"} trong tháng này.", 14f, ui.muted), 8)
+            ui.add(c, empty(R.drawable.ic_tag, "Không có giao dịch ${if (tagIn) "vào" else "ra"} trong tháng này."), 8)
             return c
         }
         val total = rows.sumOf { it.second }.coerceAtLeast(1)
         for ((tag, amount) in rows) {
             val color = tag?.color ?: ui.muted
             val pct = amount * 100 / total
-            val row = ui.vbox().apply {
-                setPadding(dp(4), dp(8), dp(4), dp(8))
-                background = ui.pressable(ui.surface, 8)
+            val avatar = if (tag == null) ui.iconCircle(R.drawable.ic_tag, color, 36) else ui.letterCircle(tag.name, color, 36)
+            val body = ui.vbox().apply {
                 addView(ui.split(
-                    ui.text(ui.dotLabel(tag?.name ?: "Chưa gắn tag", color), 14f),
-                    ui.text("${ui.money(amount)} · $pct%", 13f, ui.muted),
+                    ui.text(tag?.name ?: "Chưa gắn tag", 14f, bold = true).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END },
+                    ui.text(ui.money(amount), 14f, bold = true).apply { fontFeatureSettings = "tnum" },
                 ))
-                ui.add(this, ui.bar(amount.toFloat() / total, color), 6)
+                ui.add(this, ui.split(ui.bar(amount.toFloat() / total, color), ui.text("$pct%", 12f, ui.muted)), 6)
+            }
+            val row = ui.listRow(avatar, body, null).apply {
+                setPadding(dp(4), dp(10), dp(4), dp(10))
+                background = ui.pressable(ui.surface, 12)
                 setOnClickListener {
                     tagFilter = tag?.id ?: UNTAGGED
                     filter = if (tagIn) Filter.IN else Filter.OUT
@@ -342,73 +436,89 @@ class MainActivity : Activity() {
         return c
     }
 
-    private fun kpi(label: String, amount: Long, count: Int, color: Int) = ui.card().apply {
-        addView(ui.text(label, 13f, ui.muted))
-        addView(ui.text(ui.money(amount), 18f, color, bold = true).apply {
-            setSingleLine()
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, dp(2))
-        })
-        addView(ui.text("$count giao dịch", 12f, ui.muted))
+    private fun kpi(res: Int, label: String, amount: Long, count: Int, color: Int) = ui.card().apply {
+        addView(ui.listRow(ui.iconCircle(res, color, 32), ui.text(label, 13f, ui.muted), null))
+        ui.add(this, ui.amount(amount, 18f, ui.fg), 12)
+        ui.add(this, ui.text("$count giao dịch", 12f, ui.muted), 4)
     }
 
     private fun legend() = LinearLayout(this).apply {
-        addView(ui.text("● Vào", 12f, ui.green))
-        addView(ui.text("● Ra", 12f, ui.red).apply { setPadding(dp(10), 0, 0, 0) })
+        addView(ui.text(ui.dotLabel("Vào", ui.green), 12f, ui.muted))
+        addView(ui.text(ui.dotLabel("Ra", ui.red), 12f, ui.muted).apply { setPadding(dp(10), 0, 0, 0) })
     }
 
     private fun monthSwitcher(): View {
         val now = YearMonth.now(Ledger.VN)
-        val prev = ui.button("‹", filled = false) { month = month.minusMonths(1); renderData() }
-        val next = ui.button("›", filled = false) {
-            if (month < now) {
-                month = month.plusMonths(1)
-                renderData()
-            }
+        fun arrow(res: Int, enabled: Boolean, onClick: () -> Unit) = ui.iconCircle(res, ui.fg, 40, fill = ui.surface).apply {
+            background = ui.pressable(ui.surface, 20, stroke = ui.line)
+            alpha = if (enabled) 1f else 0.35f
+            setOnClickListener { if (enabled) onClick() }
         }
-        prev.textSize = 20f
-        next.textSize = 20f
-        prev.setPadding(0, dp(4), 0, dp(6))
-        next.setPadding(0, dp(4), 0, dp(6))
-        next.alpha = if (month < now) 1f else 0.35f
-        val title = ui.text("Tháng ${month.monthValue}/${month.year}", 17f, bold = true).apply {
-            gravity = Gravity.CENTER
+        val prev = arrow(R.drawable.ic_chevron_left, true) { month = month.minusMonths(1); renderData() }
+        val next = arrow(R.drawable.ic_chevron_right, month < now) { month = month.plusMonths(1); renderData() }
+        val title = ui.vbox().apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(ui.text("Tháng ${month.monthValue}", 17f, bold = true))
+            addView(ui.text(if (month == now) "${month.year} · tháng này" else "${month.year}", 12f, ui.muted).apply {
+                setPadding(0, dp(2), 0, 0)
+            })
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(prev, LinearLayout.LayoutParams(dp(48), WRAP))
+            addView(prev)
             addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
-            addView(next, LinearLayout.LayoutParams(dp(48), WRAP))
+            addView(next)
         }
     }
 
     private fun txList(parent: LinearLayout, list: List<Tx>, fmt: DateTimeFormatter) {
         list.forEachIndexed { i, t ->
-            if (i > 0) parent.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1))
+            // Đường kẻ thụt vào sau avatar
+            if (i > 0) parent.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1).apply { marginStart = dp(52) })
             parent.addView(txRow(t, fmt))
         }
     }
 
+    /** Avatar giao dịch: chữ cái tag, ví (tiền mặt) hoặc mũi tên vào/ra. */
+    private fun txAvatar(t: Tx, size: Int = 40): View = when {
+        t.tag != null -> ui.letterCircle(t.tag.name, t.tag.color, size)
+        t.manual -> ui.iconCircle(R.drawable.ic_wallet, ui.green, size)
+        t.isIn -> ui.iconCircle(R.drawable.ic_arrow_down, ui.green, size)
+        else -> ui.iconCircle(R.drawable.ic_arrow_up, ui.muted, size)
+    }
+
+    /** "Có thể trùng" (số dư không đổi so với mắt xích trước) / "Lệch số dư"; null nếu không lệch. */
+    private fun gapLabel(t: Tx): String? {
+        val gap = t.gap ?: return null
+        val gd = t.amount - t.fee
+        return if (gap == (if (t.isIn) gd else -gd)) "Có thể trùng" else "Lệch số dư"
+    }
+
     private fun txRow(t: Tx, fmt: DateTimeFormatter): View {
-        val left = ui.vbox()
-        left.addView(ui.text(t.description ?: "(không có nội dung)", 14f).apply {
-            maxLines = 2
+        val body = ui.vbox()
+        body.addView(ui.text(t.description ?: "(không có nội dung)", 15f).apply {
+            maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
         // Thông báo không ghi giờ giao dịch → đang dùng giờ máy nhận, ghi chú để phân biệt
         val meta = SpannableStringBuilder(fmt.format(Instant.ofEpochMilli(t.time)))
-        if (!t.timeFromText) meta.append(" · giờ nhận thông báo")
+        if (!t.timeFromText) meta.append(" · giờ nhận TB")
+        t.tag?.let { meta.append(" · ").append(it.name) }
         if (t.manual) meta.append(" · Tiền mặt")
-        t.tag?.let { meta.append("   ").append(ui.dotLabel(it.name, it.color)) }
-        left.addView(ui.text(meta, 12f, ui.muted))
-        val amount = ui.text(
-            ui.money(if (t.isIn) t.amount else -t.amount, signed = true),
-            15f, if (t.isIn) ui.green else ui.red, bold = true,
-        )
-        return ui.split(left, amount).apply {
-            setPadding(0, dp(10), 0, dp(10))
-            background = ui.pressable(ui.surface, 8)
+        gapLabel(t)?.let {
+            val start = meta.length
+            meta.append(" · ").append(it)
+            meta.setSpan(ForegroundColorSpan(ui.warn), start, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        ui.add(body, ui.text(meta, 12f, ui.muted).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }, 4)
+        val amount = ui.amount(if (t.isIn) t.amount else -t.amount, 15f, if (t.isIn) ui.green else ui.fg, signed = true)
+        return ui.listRow(txAvatar(t), body, amount).apply {
+            setPadding(0, dp(12), 0, dp(12))
+            background = ui.pressable(ui.surface, 12)
             setOnClickListener { showTx(t) }
         }
     }
@@ -419,19 +529,31 @@ class MainActivity : Activity() {
         val color = if (t.isIn) ui.green else ui.red
         val box = sheetBox()
         fun addWrap(v: View, gap: Int) = box.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(gap) })
+        // Giữ kích thước view tự đặt (avatar tròn), còn lại WRAP
+        fun addCenter(v: View, gap: Int) = box.addView(v, LinearLayout.LayoutParams(v.layoutParams?.width ?: WRAP, v.layoutParams?.height ?: WRAP).apply {
+            topMargin = dp(gap)
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
 
-        addWrap(ui.text(if (t.isIn) "Tiền vào" else "Tiền ra", 12f, color, bold = true).apply {
-            background = ui.rounded(ui.soft(color), 20)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }, 14)
-        ui.add(box, ui.text(ui.money(if (t.isIn) t.amount else -t.amount, signed = true), 32f, color, bold = true), 6)
-        ui.add(box, ui.text(t.description ?: "(không có nội dung)", 16f).apply { setTextIsSelectable(true) }, 4)
+        // Đầu sheet căn giữa: avatar, số tiền, nội dung, thời gian
+        addCenter(txAvatar(t, 56), 18)
+        addCenter(ui.amount(if (t.isIn) t.amount else -t.amount, 32f, if (t.isIn) ui.green else ui.fg, signed = true), 12)
+        ui.add(box, ui.text(t.description ?: "(không có nội dung)", 15f).apply {
+            gravity = Gravity.CENTER
+            setTextIsSelectable(true)
+        }, 6)
         val day = dayFmt.format(t.date).replaceFirstChar { it.uppercase() }
         val clock = clockFmt.format(Instant.ofEpochMilli(t.time)) + if (t.timeFromText) "" else " (giờ nhận thông báo)"
-        ui.add(box, ui.text("$day · $clock" + if (t.manual) " · Tiền mặt" else "", 13f, ui.muted), 4)
+        ui.add(box, ui.text("$clock · $day", 13f, ui.muted).apply { gravity = Gravity.CENTER }, 6)
+        val pills = LinearLayout(this).apply {
+            addView(ui.pill(if (t.isIn) "Tiền vào" else "Tiền ra", color))
+            if (t.manual) addView(ui.pill("Tiền mặt", ui.primary), LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(6) })
+            gapLabel(t)?.let { addView(ui.pill(it, ui.warn), LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(6) }) }
+        }
+        addCenter(pills, 10)
 
         // Tag: chạm để gắn, chạm lại tag đang chọn để bỏ
-        ui.add(box, ui.text("TAG", 12f, ui.muted, bold = true), 20)
+        ui.add(box, ui.text("Tag", 14f, bold = true), 22)
         val tagFlow = ui.flow().also { ui.add(box, it, 8) }
         var current = t.tag?.id
         var changed = false
@@ -460,53 +582,88 @@ class MainActivity : Activity() {
         fillTags()
 
         val raw = if (t.manual) null else store.text(t.id)
-        // amount lớn hơn GD trong thông báo = đã cộng phí/VAT khớp số dư
-        val gd = raw?.let { Parser.parse(it) }?.amount?.takeIf { it < t.amount }
+        val fee = t.fee.takeIf { it > 0 }
         val info = listOfNotNull(
-            gd?.let { "Số tiền GD" to ui.money(it) },
-            gd?.let { "Phí/VAT (khớp số dư)" to ui.money(t.amount - it) },
+            fee?.let { "Số tiền GD" to ui.money(t.amount - it) },
+            fee?.let { (if (t.feeConfirmed) "Phí (bạn đã ghi nhận)" else "Phí/VAT (khớp số dư)") to ui.money(it) },
             t.balanceAfter?.let { "Số dư sau giao dịch" to ui.money(it) },
+            t.gap?.let { "Lệch số dư" to (if (it > 0) "thiếu " else "thừa ") + ui.money(kotlin.math.abs(it)) },
             t.account?.let { "Tài khoản" to it },
         )
         if (info.isNotEmpty()) {
-            val card = ui.card(radius = 14, color = ui.bg)
+            val card = ui.card(radius = 16, color = ui.surface2).apply { setPadding(dp(14), dp(12), dp(14), dp(12)) }
             info.forEachIndexed { i, (label, value) ->
-                if (i > 0) card.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1).apply { topMargin = dp(10) })
+                if (i > 0) card.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1).apply { topMargin = dp(11) })
                 card.addView(ui.split(
                     ui.text(label, 13f, ui.muted),
-                    ui.text(value, 14f, bold = true).apply { setTextIsSelectable(true) },
-                ).apply { setPadding(0, if (i > 0) dp(10) else 0, 0, 0) })
+                    ui.text(value, 14f, bold = true).apply {
+                        fontFeatureSettings = "tnum"
+                        setTextIsSelectable(true)
+                    },
+                ).apply { setPadding(0, if (i > 0) dp(11) else 0, 0, 0) })
             }
             ui.add(box, card, 20)
+        }
+
+        t.gap?.let { gap ->
+            val gd = t.amount - t.fee
+            // Số dư không đổi so với mắt xích trước → lệch đúng bằng GD
+            val sameBalance = gap == (if (t.isIn) gd else -gd)
+            ui.add(box, ui.callout(
+                R.drawable.ic_warning,
+                when {
+                    sameBalance -> "Số dư không đổi so với giao dịch liền trước — nhiều khả năng đây là bản trùng. " +
+                        "Xem thông báo gốc, đúng thì xoá giao dịch này."
+                    gap > 0 -> "Số dư sau giao dịch thấp hơn mức tính từ giao dịch liền trước. " +
+                        "Có thể sót một giao dịch tiền ra, hoặc bị trừ phí không ghi trong thông báo."
+                    else -> "Số dư sau giao dịch cao hơn mức tính từ giao dịch liền trước — có thể sót một giao dịch tiền vào."
+                },
+                ui.warn,
+            ), 10)
+            if (gap > 0 && !t.isIn) {
+                ui.add(box, ui.button("Ghi nhận ${ui.money(gap)} là phí", filled = false, icon = R.drawable.ic_check_circle) {
+                    store.confirmFee(t.id, true)
+                    changed = true
+                    dialog.dismiss()
+                }, 8)
+            }
+        }
+        if (t.feeConfirmed) {
+            ui.add(box, ui.button("Bỏ ghi nhận phí", filled = false) {
+                store.confirmFee(t.id, false)
+                changed = true
+                dialog.dismiss()
+            }, 8)
         }
 
         if (raw != null) {
             val rawText = ui.text(raw, 13f).apply {
                 setTextIsSelectable(true)
-                background = ui.rounded(ui.bg, 10)
+                background = ui.rounded(ui.surface2, 12)
                 setPadding(dp(12), dp(10), dp(12), dp(10))
                 visibility = View.GONE
             }
-            val toggle = ui.text("Xem thông báo gốc ▾", 13f, ui.primary, bold = true).apply {
+            fun label(show: Boolean) = ui.iconText(R.drawable.ic_bell, if (show) "Ẩn thông báo gốc" else "Xem thông báo gốc", ui.primary, 16)
+            val toggle = ui.text(label(false), 13f, ui.primary, bold = true).apply {
                 setPadding(0, dp(6), 0, dp(6))
                 setOnClickListener {
                     val show = rawText.visibility != View.VISIBLE
                     rawText.visibility = if (show) View.VISIBLE else View.GONE
-                    text = if (show) "Ẩn thông báo gốc ▴" else "Xem thông báo gốc ▾"
+                    text = label(show)
                 }
             }
             addWrap(toggle, 14)
             ui.add(box, rawText, 4)
         }
 
-        ui.add(box, ui.button("Xong") { dialog.dismiss() }, 20)
+        ui.add(box, ui.button("Xong") { dialog.dismiss() }, 22)
         if (t.manual) {
-            ui.add(box, ui.button("Sửa", filled = false) {
+            ui.add(box, ui.button("Sửa", filled = false, icon = R.drawable.ic_edit) {
                 dialog.dismiss()
                 showManualForm(t)
             }, 8)
         }
-        ui.add(box, ui.button("Xoá giao dịch", filled = false) {
+        ui.add(box, ui.button("Xoá giao dịch", danger = true, icon = R.drawable.ic_delete) {
             AlertDialog.Builder(this)
                 .setTitle("Xoá giao dịch này?")
                 .setMessage(
@@ -520,7 +677,7 @@ class MainActivity : Activity() {
                 }
                 .setNegativeButton("Huỷ", null)
                 .show()
-        }.apply { setTextColor(ui.red) }, 8)
+        }, 8)
 
         dialog.setOnDismissListener { if (changed) reload() }
         showSheet(dialog, box)
@@ -530,7 +687,7 @@ class MainActivity : Activity() {
     private fun showManualForm(t: Tx?) {
         val dialog = Dialog(this)
         val box = sheetBox()
-        ui.add(box, ui.text(if (t == null) "Thêm giao dịch" else "Sửa giao dịch", 18f, bold = true), 14)
+        ui.add(box, ui.text(if (t == null) "Thêm giao dịch tiền mặt" else "Sửa giao dịch", 20f, bold = true), 16)
         // Mẫu gần đây: điền sau khi dựng xong các ô bên dưới
         val tplRow = LinearLayout(this)
         val templates = if (t == null) ledger.templates(8) else emptyList()
@@ -542,33 +699,15 @@ class MainActivity : Activity() {
         }
 
         var isIn = t?.isIn ?: false
-        val dirRow = LinearLayout(this)
+        val dirRow = FrameLayout(this)
         fun fillDir() {
             dirRow.removeAllViews()
-            listOf(false to "Tiền ra", true to "Tiền vào").forEachIndexed { i, (v, s) ->
-                dirRow.addView(
-                    ui.chip(s, v == isIn) { isIn = v; fillDir() },
-                    LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(8) },
-                )
-            }
+            dirRow.addView(ui.segmented(listOf("Tiền ra", "Tiền vào"), if (isIn) 1 else 0) { isIn = it == 1; fillDir() })
         }
         fillDir()
         ui.add(box, dirRow, 14)
 
-        val amount = ui.input("Số tiền (₫)").apply { inputType = InputType.TYPE_CLASS_NUMBER }
-        // Tự thêm dấu chấm hàng nghìn khi gõ
-        amount.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable) {
-                val digits = s.filter { it.isDigit() }.toString().trimStart('0').take(13)
-                val f = if (digits.isEmpty()) "" else groupFmt.format(digits.toLong())
-                if (f != s.toString()) {
-                    amount.setText(f)
-                    amount.setSelection(f.length)
-                }
-            }
-        })
+        val amount = moneyInput("Số tiền (₫)")
         t?.let { amount.setText(it.amount.toString()) }
         ui.add(box, amount, 12)
         val quick = LinearLayout(this)
@@ -584,47 +723,17 @@ class MainActivity : Activity() {
         }, 8)
 
         val now = LocalDateTime.now(Ledger.VN).withSecond(0).withNano(0)
-        val today = now.toLocalDate()
         // Thêm mới khi đang xem tháng cũ → mặc định cuối tháng đó
-        var at = t?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it.time), Ledger.VN) }
-            ?: if (month < YearMonth.from(today)) month.atEndOfMonth().atTime(now.toLocalTime()) else now
-        val dateBtn = ui.button("", filled = false) {}
-        val timeBtn = ui.button("", filled = false) {}
-        val dayRow = LinearLayout(this)
-        fun showAt() {
-            dateBtn.text = at.format(dateFmt)
-            timeBtn.text = at.format(hmFmt)
-            dayRow.removeAllViews()
-            listOf("Hôm nay" to today, "Hôm qua" to today.minusDays(1)).forEachIndexed { i, (label, d) ->
-                dayRow.addView(
-                    ui.chip(label, at.toLocalDate() == d) {
-                        at = LocalDateTime.of(d, at.toLocalTime())
-                        showAt()
-                    },
-                    LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(6) },
-                )
-            }
-        }
-        showAt()
-        dateBtn.setOnClickListener {
-            DatePickerDialog(this, { _, y, m, d ->
-                at = LocalDateTime.of(LocalDate.of(y, m + 1, d), at.toLocalTime())
-                showAt()
-            }, at.year, at.monthValue - 1, at.dayOfMonth).show()
-        }
-        timeBtn.setOnClickListener {
-            TimePickerDialog(this, { _, h, min ->
-                at = at.withHour(h).withMinute(min)
-                showAt()
-            }, at.hour, at.minute, true).show()
-        }
-        ui.add(box, ui.row(dateBtn, timeBtn), 12)
-        ui.add(box, dayRow, 8)
+        val at = addDateTime(
+            box,
+            t?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it.time), Ledger.VN) }
+                ?: if (month < YearMonth.from(now)) month.atEndOfMonth().atTime(now.toLocalTime()) else now,
+        )
 
         val desc = ui.input("Nội dung (tuỳ chọn), vd: Ăn sáng").apply { setText(t?.description.orEmpty()) }
         ui.add(box, desc, 12)
 
-        ui.add(box, ui.text("TAG", 12f, ui.muted, bold = true), 20)
+        ui.add(box, ui.text("Tag", 14f, bold = true), 20)
         val tagFlow = ui.flow().also { ui.add(box, it, 8) }
         var tagId = if (t == null) ledger.lastManualTag?.id else t.tag?.id
         fun fillTags() {
@@ -666,13 +775,157 @@ class MainActivity : Activity() {
                 toast("Nhập số tiền")
                 return@button
             }
-            val time = at.atZone(Ledger.VN).toInstant().toEpochMilli()
+            val time = at().atZone(Ledger.VN).toInstant().toEpochMilli()
             store.saveManual(t?.id, value, isIn, time, desc.text.toString().trim().take(500).ifEmpty { null }, tagId)
-            month = YearMonth.from(at)
+            month = YearMonth.from(at())
             dialog.dismiss()
             reload()
         }, 20)
         showSheet(dialog, box)
+    }
+
+    /** Ô nhập số tiền cỡ lớn, tự thêm dấu chấm hàng nghìn khi gõ. */
+    private fun moneyInput(hint: String): EditText = ui.input(hint).apply {
+        inputType = InputType.TYPE_CLASS_NUMBER
+        textSize = 24f
+        typeface = ui.medium
+        fontFeatureSettings = "tnum"
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        val input = this
+        addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable) {
+                val digits = s.filter { it.isDigit() }.toString().trimStart('0').take(13)
+                val f = if (digits.isEmpty()) "" else groupFmt.format(digits.toLong())
+                if (f != s.toString()) {
+                    input.setText(f)
+                    input.setSelection(f.length)
+                }
+            }
+        })
+    }
+
+    /** Nút chọn ngày, giờ và chip Hôm nay/Hôm qua thêm vào [box]; trả về hàm đọc thời điểm đang chọn. */
+    private fun addDateTime(box: LinearLayout, initial: LocalDateTime): () -> LocalDateTime {
+        val today = LocalDate.now(Ledger.VN)
+        var at = initial
+        val dateBtn = ui.button("", filled = false) {}
+        val timeBtn = ui.button("", filled = false) {}
+        val dayRow = LinearLayout(this)
+        fun showAt() {
+            dateBtn.text = ui.iconText(R.drawable.ic_calendar, at.format(dateFmt), ui.primary, 18)
+            timeBtn.text = ui.iconText(R.drawable.ic_clock, at.format(hmFmt), ui.primary, 18)
+            dayRow.removeAllViews()
+            listOf("Hôm nay" to today, "Hôm qua" to today.minusDays(1)).forEachIndexed { i, (label, d) ->
+                dayRow.addView(
+                    ui.chip(label, at.toLocalDate() == d) {
+                        at = LocalDateTime.of(d, at.toLocalTime())
+                        showAt()
+                    },
+                    LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(6) },
+                )
+            }
+        }
+        showAt()
+        dateBtn.setOnClickListener {
+            DatePickerDialog(this, { _, y, m, d ->
+                at = LocalDateTime.of(LocalDate.of(y, m + 1, d), at.toLocalTime())
+                showAt()
+            }, at.year, at.monthValue - 1, at.dayOfMonth).show()
+        }
+        timeBtn.setOnClickListener {
+            TimePickerDialog(this, { _, h, min ->
+                at = at.withHour(h).withMinute(min)
+                showAt()
+            }, at.hour, at.minute, true).show()
+        }
+        ui.add(box, ui.row(dateBtn, timeBtn), 12)
+        ui.add(box, dayRow, 8)
+        return { at }
+    }
+
+    /** Form nhập số dư thực tế (xem trong app MB) làm mốc đối soát. */
+    private fun showMarkForm() {
+        val accounts = store.accounts(settings.mbPackage)
+        if (accounts.isEmpty()) {
+            toast("Chưa có giao dịch MB nào ghi số tài khoản và số dư")
+            return
+        }
+        val dialog = Dialog(this)
+        val box = sheetBox()
+        ui.add(box, ui.text("Số dư thực tế", 20f, bold = true), 16)
+        ui.add(box, ui.text(
+            "Số dư đang hiện trong app MB tại thời điểm bên dưới (đã gồm mọi giao dịch tới lúc đó). " +
+                "App dùng làm mốc để kiểm tra phí, giao dịch sót hoặc trùng ở giao dịch kế tiếp.",
+            12f, ui.muted,
+        ), 4)
+        var account = accounts.first()
+        if (accounts.size > 1) {
+            val accRow = ui.flow()
+            fun fillAcc() {
+                accRow.removeAllViews()
+                for (a in accounts) accRow.addView(ui.chip("TK $a", a == account) { account = a; fillAcc() })
+            }
+            fillAcc()
+            ui.add(box, accRow, 12)
+        }
+        val amount = moneyInput("Số dư (₫)")
+        ui.add(box, amount, 12)
+        val at = addDateTime(box, LocalDateTime.now(Ledger.VN).withSecond(0).withNano(0))
+        ui.add(box, ui.button("Lưu") {
+            val value = amount.text.filter { it.isDigit() }.toString().toLongOrNull()
+            if (value == null) {
+                toast("Nhập số dư")
+                return@button
+            }
+            store.addMark(account, value, at().atZone(Ledger.VN).toInstant().toEpochMilli())
+            dialog.dismiss()
+            renderMarks()
+            reload()
+        }, 20)
+        showSheet(dialog, box)
+    }
+
+    /** Danh sách mốc số dư ở Cài đặt; chạm để xoá. */
+    private fun renderMarks() {
+        marksBox.removeAllViews()
+        val marks = store.marks(10)
+        if (marks.isEmpty()) {
+            marksBox.addView(ui.text("Chưa nhập mốc nào.", 13f, ui.muted))
+            return
+        }
+        for (m in marks) {
+            val gap = m.gap
+            val (res, color, state) = when {
+                gap == null -> Triple(R.drawable.ic_info, ui.muted, "Chưa có giao dịch trước để so")
+                gap == 0L -> Triple(R.drawable.ic_check_circle, ui.green, "Khớp với giao dịch trước")
+                else -> Triple(
+                    R.drawable.ic_warning, ui.warn,
+                    "Lệch ${if (gap > 0) "thiếu" else "thừa"} ${ui.money(kotlin.math.abs(gap))} so với giao dịch trước",
+                )
+            }
+            val body = ui.vbox().apply {
+                addView(ui.split(ui.amount(m.balance, 15f), ui.text(fmt(m.at), 12f, ui.muted)))
+                ui.add(this, ui.text("TK ${m.account} · $state", 12f, if (color == ui.muted) ui.muted else color), 4)
+            }
+            val v = ui.listRow(ui.iconCircle(res, color, 36), body, null).apply {
+                setPadding(dp(4), dp(10), dp(4), dp(10))
+                background = ui.pressable(ui.surface, 12)
+                setOnClickListener {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Xoá mốc số dư này?")
+                        .setPositiveButton("Xoá") { _, _ ->
+                            store.deleteMark(m.id)
+                            renderMarks()
+                            reload()
+                        }
+                        .setNegativeButton("Huỷ", null)
+                        .show()
+                }
+            }
+            ui.add(marksBox, v, 4)
+        }
     }
 
     /** Khung bottom sheet có thanh kéo; thêm nội dung rồi gọi [showSheet]. */
@@ -725,14 +978,11 @@ class MainActivity : Activity() {
         box.removeAllViews()
         ui.add(box, monthSwitcher(), 4)
 
-        val chips = LinearLayout(this)
-        listOf(Filter.ALL to "Tất cả", Filter.IN to "Tiền vào", Filter.OUT to "Tiền ra").forEachIndexed { i, (f, s) ->
-            chips.addView(
-                ui.chip(s, f == filter) { filter = f; renderTransactions() },
-                LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) marginStart = dp(8) },
-            )
-        }
-        ui.add(box, chips, 8)
+        val filters = listOf(Filter.ALL, Filter.IN, Filter.OUT)
+        ui.add(box, ui.segmented(listOf("Tất cả", "Tiền vào", "Tiền ra"), filters.indexOf(filter)) {
+            filter = filters[it]
+            renderTransactions()
+        }, 12)
 
         val tags = store.tags()
         if (tagFilter != null && tagFilter != UNTAGGED && tags.none { it.id == tagFilter }) tagFilter = null
@@ -747,7 +997,7 @@ class MainActivity : Activity() {
         ui.add(box, HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(tagRow)
-        }, 8)
+        }, 10)
 
         val list = ledger.inMonth(month).filter {
             if (it.manual) return@filter false
@@ -764,23 +1014,37 @@ class MainActivity : Activity() {
             dirOk && tagOk
         }
         if (list.isEmpty()) {
-            ui.add(box, ui.card().apply { addView(ui.text("Không có giao dịch phù hợp trong tháng này.", 14f, ui.muted)) })
+            ui.add(box, ui.card().apply { addView(empty(R.drawable.ic_list, "Không có giao dịch phù hợp trong tháng này.")) })
+        } else {
+            val (ins, outs) = list.partition { it.isIn }
+            ui.add(box, ui.text(
+                "${list.size} giao dịch · vào ${ui.short(ins.sumOf { it.amount })} · ra ${ui.short(outs.sumOf { it.amount })}",
+                12f, ui.muted,
+            ).apply { setPadding(dp(4), 0, dp(4), 0) }, 14)
         }
         dayGroups(box, list)
 
         val unparsed = ledger.unparsed.filter { Ledger.monthOf(it.postedAt) == month }
         if (unparsed.isNotEmpty()) {
             val c = ui.card()
-            c.addView(ui.text("Giao dịch chưa đọc được (${unparsed.size})", 14f, bold = true))
-            c.addView(ui.text("Mẫu thông báo mới parser chưa hỗ trợ — chưa tính vào thống kê.", 12f, ui.muted))
+            c.addView(ui.listRow(
+                ui.iconCircle(R.drawable.ic_warning, ui.warn, 36),
+                ui.vbox().apply {
+                    addView(ui.text("Chưa đọc được (${unparsed.size})", 15f, bold = true))
+                    ui.add(this, ui.text("Mẫu thông báo mới parser chưa hỗ trợ — chưa tính vào thống kê.", 12f, ui.muted), 2)
+                },
+                null,
+            ))
             for (it in unparsed.take(20)) {
-                c.addView(ui.text(timeFmt.format(Instant.ofEpochMilli(it.postedAt)), 12f, ui.muted).apply {
-                    setPadding(0, dp(10), 0, 0)
-                })
-                c.addView(ui.text(it.text, 13f).apply {
-                    maxLines = 4
-                    ellipsize = TextUtils.TruncateAt.END
-                })
+                ui.add(c, ui.vbox().apply {
+                    background = ui.rounded(ui.surface2, 12)
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    addView(ui.text(timeFmt.format(Instant.ofEpochMilli(it.postedAt)), 12f, ui.muted))
+                    ui.add(this, ui.text(it.text, 13f).apply {
+                        maxLines = 4
+                        ellipsize = TextUtils.TruncateAt.END
+                    }, 4)
+                }, 10)
             }
             ui.add(box, c, 20)
         }
@@ -792,12 +1056,14 @@ class MainActivity : Activity() {
             val net = items.sumOf { if (it.isIn) it.amount else -it.amount }
             val head = ui.split(
                 ui.text(dayFmt.format(day).replaceFirstChar { it.uppercase() }, 13f, ui.muted, bold = true),
-                ui.text(ui.money(net, signed = true), 13f, ui.muted),
+                ui.text(ui.money(net, signed = true), 13f, if (net > 0) ui.green else ui.muted, bold = true).apply {
+                    fontFeatureSettings = "tnum"
+                },
             ).apply { setPadding(dp(4), 0, dp(4), 0) }
-            ui.add(box, head, 16)
-            val c = ui.card().apply { setPadding(dp(16), dp(2), dp(16), dp(2)) }
+            ui.add(box, head, 18)
+            val c = ui.card().apply { setPadding(dp(14), dp(2), dp(14), dp(2)) }
             txList(c, items, clockFmt)
-            ui.add(box, c, 6)
+            ui.add(box, c, 8)
         }
     }
 
@@ -809,21 +1075,21 @@ class MainActivity : Activity() {
         box.removeAllViews()
         ui.add(box, monthSwitcher(), 4)
 
-        val hero = ui.card(radius = 22, color = ui.primary).apply { setPadding(dp(20), dp(18), dp(20), dp(18)) }
-        hero.addView(ui.text("Tiền mặt hiện có", 13f, ui.onPrimary).apply { alpha = 0.8f })
-        hero.addView(ui.text(ui.money(ledger.cashBalance), 30f, ui.onPrimary, bold = true))
-        ui.add(box, hero)
+        val hero = ui.hero(ui.cashStart, ui.cashEnd)
+        hero.addView(ui.text(ui.iconText(R.drawable.ic_wallet, "Tiền mặt hiện có", ui.onHero, 16), 13f, ui.onHero).apply { alpha = 0.85f })
+        ui.add(hero, ui.amount(ledger.cashBalance, 32f, ui.onHero), 8)
+        ui.add(box, hero, 8)
 
         val list = ledger.inMonth(month).filter { it.manual }
         val (ins, outs) = list.partition { it.isIn }
         ui.add(box, ui.row(
-            kpi("Tiền vào", ins.sumOf { it.amount }, ins.size, ui.green),
-            kpi("Tiền ra", outs.sumOf { it.amount }, outs.size, ui.red),
+            kpi(R.drawable.ic_arrow_down, "Tiền vào", ins.sumOf { it.amount }, ins.size, ui.green),
+            kpi(R.drawable.ic_arrow_up, "Tiền ra", outs.sumOf { it.amount }, outs.size, ui.red),
             gap = 12,
         ))
         if (list.isEmpty()) {
             ui.add(box, ui.card().apply {
-                addView(ui.text("Chưa có giao dịch tiền mặt trong tháng này. Bấm + để thêm.", 14f, ui.muted))
+                addView(empty(R.drawable.ic_wallet, "Chưa có giao dịch tiền mặt trong tháng này. Bấm + để thêm."))
             })
         }
         dayGroups(box, list)
@@ -831,13 +1097,16 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ tab Cài đặt
 
-    private fun section(title: String): LinearLayout {
-        ui.add(settingsBox, ui.text(title, 13f, ui.muted, bold = true).apply { setPadding(dp(4), 0, 0, 0) }, 20)
-        return ui.card().also { ui.add(settingsBox, it, 6) }
+    /** Mục cài đặt: tiêu đề có icon + card nội dung. */
+    private fun section(title: String, res: Int): LinearLayout {
+        ui.add(settingsBox, ui.text(ui.iconText(res, title, ui.primary, 18), 15f, bold = true).apply {
+            setPadding(dp(4), 0, 0, 0)
+        }, 24)
+        return ui.card().also { ui.add(settingsBox, it, 10) }
     }
 
     private fun buildSettings() {
-        val perm = section("QUYỀN")
+        val perm = section("Quyền & chạy nền", R.drawable.ic_shield)
         permText = ui.text("", 14f).also { perm.addView(it) }
         permButton = ui.button("Mở cài đặt quyền đọc thông báo") {
             startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -851,12 +1120,12 @@ class MainActivity : Activity() {
             12f, ui.muted,
         ), 10)
 
-        val tagSec = section("TAG THU CHI")
+        val tagSec = section("Tag thu chi", R.drawable.ic_tag)
         tagSec.addView(ui.text("Gắn tag trong màn chi tiết giao dịch. Chạm tag ở đây để đổi tên hoặc xoá.", 12f, ui.muted))
         tagsBox = ui.flow().also { ui.add(tagSec, it, 10) }
         renderTagSettings()
 
-        val bank = section("APP NGÂN HÀNG")
+        val bank = section("App ngân hàng", R.drawable.ic_bank)
         pkgText = ui.text("", 14f).also { bank.addView(it) }
         ui.add(bank, ui.text(
             "App vừa có thông báo (bấm để chọn làm app MB Bank). Chỉ lưu tên app, không lưu nội dung:",
@@ -864,16 +1133,27 @@ class MainActivity : Activity() {
         ), 6)
         sourcesBox = ui.vbox().also { ui.add(bank, it, 6) }
 
-        val scan = section("QUÉT THÔNG BÁO")
+        val markSec = section("Số dư thực tế", R.drawable.ic_wallet)
+        markSec.addView(ui.text(
+            "Thỉnh thoảng (vd đầu tháng, hoặc khi thấy lệch) mở app MB xem số dư rồi nhập vào đây. " +
+                "Mốc này giúp đối soát phí, giao dịch sót/trùng ở giao dịch kế tiếp và số dư đầu tháng ở Tổng quan. Chạm mốc để xoá.",
+            12f, ui.muted,
+        ))
+        ui.add(markSec, ui.button("Nhập số dư thực tế", icon = R.drawable.ic_add) { showMarkForm() }, 12)
+        marksBox = ui.vbox().also { ui.add(markSec, it, 8) }
+        renderMarks()
+
+        val scan = section("Quét thông báo", R.drawable.ic_sync)
         scanText = ui.text("", 14f).also { scan.addView(it) }
-        ui.add(scan, ui.button("Quét lại thông báo đang hiện") { scanNotifications() }, 10)
-        ui.add(scan, ui.button("Kiểm tra lại dữ liệu đã lưu", filled = false) { recheckStored() }, 8)
+        ui.add(scan, ui.button("Quét lại thông báo đang hiện", icon = R.drawable.ic_sync) { scanNotifications() }, 12)
+        ui.add(scan, ui.button("Kiểm tra lại dữ liệu đã lưu", filled = false, icon = R.drawable.ic_shield) { recheckStored() }, 8)
         ui.add(scan, ui.text(
-            "Quét lại thanh thông báo, đọc lại mọi thông báo MB đã lưu, cộng phí/VAT khi khớp số dư và xoá giao dịch bị lưu trùng.",
+            "Quét lại thanh thông báo, đọc lại mọi thông báo MB đã lưu, xoá giao dịch bị lưu trùng (kể cả bản bị cắt nội dung), " +
+                "tính lại phí/VAT theo số dư và đánh dấu giao dịch lệch số dư.",
             12f, ui.muted,
         ), 6)
 
-        val log = section("THÔNG BÁO MB ĐÃ BẮT")
+        val log = section("Thông báo MB đã bắt", R.drawable.ic_bell)
         recentBox = ui.vbox().also { log.addView(it) }
     }
 
@@ -881,24 +1161,33 @@ class MainActivity : Activity() {
         val listenerOn = MbNotificationListener.isEnabled(this)
         val connected = MbNotificationListener.instance != null
         permText.text = when {
-            !listenerOn -> "❌ Chưa cấp quyền đọc thông báo"
-            !connected -> "⚠️ Đã cấp quyền nhưng dịch vụ đọc thông báo chưa chạy — đang thử kết nối lại. " +
-                "Nếu kéo dài: tắt rồi bật lại quyền."
-            else -> "✅ Đang nhận thông báo"
+            !listenerOn -> ui.iconText(R.drawable.ic_error, "Chưa cấp quyền đọc thông báo", ui.red, 18)
+            !connected -> ui.iconText(
+                R.drawable.ic_warning,
+                "Đã cấp quyền nhưng dịch vụ đọc thông báo chưa chạy — đang thử kết nối lại. Nếu kéo dài: tắt rồi bật lại quyền.",
+                ui.warn, 18,
+            )
+            else -> ui.iconText(R.drawable.ic_check_circle, "Đang nhận thông báo", ui.green, 18)
         }
         permButton.visibility = if (listenerOn && connected) View.GONE else View.VISIBLE
 
         val pm = getSystemService(PowerManager::class.java)
         val unrestricted = pm?.isIgnoringBatteryOptimizations(packageName) == true
-        batteryText.text = if (unrestricted) "✅ Được chạy nền không giới hạn" else "⚠️ Hệ thống có thể tắt app để tiết kiệm pin"
+        batteryText.text =
+            if (unrestricted) ui.iconText(R.drawable.ic_check_circle, "Được chạy nền không giới hạn", ui.green, 18)
+            else ui.iconText(R.drawable.ic_warning, "Hệ thống có thể tắt app để tiết kiệm pin", ui.warn, 18)
         batteryButton.visibility = if (unrestricted) View.GONE else View.VISIBLE
 
-        headerStatus.text = when {
-            !listenerOn -> "⚠ Chưa cấp quyền đọc thông báo — vào tab Cài đặt"
-            !connected -> "⚠ Dịch vụ đọc thông báo chưa chạy — xem tab Cài đặt"
-            else -> "Đang theo dõi ${label(settings.mbPackage)}"
-        }
-        headerStatus.setTextColor(if (!listenerOn || !connected) ui.warn else ui.muted)
+        val ok = listenerOn && connected
+        headerStatus.text = ui.dotLabel(
+            when {
+                !listenerOn -> "Chưa cấp quyền đọc thông báo — vào tab Cài đặt"
+                !connected -> "Dịch vụ đọc thông báo chưa chạy — xem tab Cài đặt"
+                else -> "Đang theo dõi ${label(settings.mbPackage)}"
+            },
+            if (ok) ui.green else ui.warn,
+        )
+        headerStatus.setTextColor(if (ok) ui.muted else ui.warn)
 
         pkgText.text = "Đang theo dõi: ${label(settings.mbPackage)} (${settings.mbPackage})"
 
@@ -910,19 +1199,25 @@ class MainActivity : Activity() {
             if (sources.isEmpty()) sourcesBox.addView(ui.text("Chưa thấy thông báo nào. Hãy cấp quyền ở trên.", 13f, ui.muted))
             for (s in sources) {
                 val chosen = s.pkg == settings.mbPackage
-                val v = ui.vbox().apply {
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
-                    background = ui.pressable(if (chosen) ui.primarySoft else ui.surface, 10)
+                val body = ui.vbox().apply {
+                    addView(ui.text(label(s.pkg), 14f, if (chosen) ui.primary else ui.fg, bold = true))
+                    ui.add(this, ui.text("${s.pkg} · ${s.count} thông báo · ${fmt(s.lastSeen)}", 12f, ui.muted), 2)
+                }
+                val v = ui.listRow(
+                    ui.iconCircle(if (chosen) R.drawable.ic_check_circle else R.drawable.ic_bell, if (chosen) ui.primary else ui.muted, 36),
+                    body, null,
+                ).apply {
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    background = ui.pressable(if (chosen) ui.primarySoft else ui.surface, 12)
                     setOnClickListener { choosePackage(s.pkg) }
-                    addView(ui.text(label(s.pkg), 14f, if (chosen) ui.primary else ui.fg, bold = chosen))
-                    addView(ui.text("${s.pkg} · ${s.count} thông báo · ${fmt(s.lastSeen)}", 12f, ui.muted))
                 }
                 ui.add(sourcesBox, v, 4)
             }
         }
 
-        scanText.text = "Đã lưu ${ledger.txs.size} giao dịch trên máy" +
-            (settings.lastError?.let { "\n⚠️ $it (${fmt(settings.lastErrorAt)})" } ?: "")
+        scanText.text = SpannableStringBuilder("Đã lưu ${ledger.txs.size} giao dịch trên máy").apply {
+            settings.lastError?.let { append("\n").append(ui.iconText(R.drawable.ic_warning, "$it (${fmt(settings.lastErrorAt)})", ui.warn)) }
+        }
 
         val recent = store.recent(15)
         val rKey = recent.joinToString { "${it.id}" }
@@ -931,18 +1226,18 @@ class MainActivity : Activity() {
             recentBox.removeAllViews()
             if (recent.isEmpty()) recentBox.addView(ui.text("Chưa có. Thông báo từ app đang theo dõi sẽ hiện ở đây.", 13f, ui.muted))
             recent.forEachIndexed { i, it ->
-                val state = when {
-                    it.deleted -> "🗑 giao dịch đã xoá"
-                    Parser.parse(it.text) != null -> "✅ giao dịch"
-                    Parser.looksLikeTransaction(it.text) -> "❔ giống giao dịch nhưng chưa đọc được"
-                    else -> "không phải giao dịch"
+                val (state, color) = when {
+                    it.deleted -> "Đã xoá" to ui.muted
+                    Parser.parse(it.text) != null -> "Giao dịch" to ui.green
+                    Parser.looksLikeTransaction(it.text) -> "Chưa đọc được" to ui.warn
+                    else -> "Không phải giao dịch" to ui.muted
                 }
-                if (i > 0) ui.add(recentBox, ui.divider().apply { minimumHeight = 1 }, 10)
-                ui.add(recentBox, ui.text("${fmt(it.postedAt)} · $state", 12f, ui.muted), if (i > 0) 10 else 0)
-                recentBox.addView(ui.text(it.text, 13f).apply {
+                if (i > 0) ui.add(recentBox, ui.divider().apply { minimumHeight = 1 }, 12)
+                ui.add(recentBox, ui.split(ui.text(fmt(it.postedAt), 12f, ui.muted), ui.pill(state, color)), if (i > 0) 12 else 0)
+                ui.add(recentBox, ui.text(it.text, 13f).apply {
                     maxLines = 5
                     ellipsize = TextUtils.TruncateAt.END
-                })
+                }, 6)
             }
         }
     }
@@ -999,6 +1294,7 @@ class MainActivity : Activity() {
                     if (scanned > 0) append(", lưu thêm $scanned thông báo")
                     append(if (r.duplicates > 0) ", xoá ${r.duplicates} bản trùng" else ", không có bản trùng")
                     if (r.withFee > 0) append(", ${r.withFee} giao dịch có phí/VAT")
+                    if (r.gaps > 0) append(", ${r.gaps} giao dịch lệch số dư")
                 }
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 reload()

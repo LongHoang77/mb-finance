@@ -10,8 +10,8 @@ import java.time.ZoneOffset
  */
 object Parser {
 
-    /** Tăng mỗi khi sửa regex để app tự phân tích lại dữ liệu cũ. */
-    const val VERSION = 2
+    /** Tăng mỗi khi sửa regex hoặc cách đối soát trùng/phí để app tự phân tích lại dữ liệu cũ. */
+    const val VERSION = 3
 
     data class Parsed(
         val amount: Long, // VND, luôn dương
@@ -86,17 +86,32 @@ object Parser {
 
     /**
      * Phí/VAT bị trừ thêm ngoài GD: số dư giảm nhiều hơn GD đúng bằng 1 số (hoặc tổng vài số) trong [Parsed.extras].
-     * Không khớp, thiếu số dư hoặc là tiền vào → 0.
+     * Không khớp, thiếu số dư, là tiền vào hoặc lệch quá lớn (dễ là sót giao dịch, để người dùng tự xác nhận) → 0.
      */
     fun fee(p: Parsed, prevBalance: Long?): Long {
         val after = p.balanceAfter ?: return 0
         if (p.isIn || prevBalance == null) return 0
         val extra = prevBalance - after - p.amount
-        if (extra <= 0) return 0
+        if (extra <= 0 || extra > maxOf(50_000L, p.amount / 10)) return 0
         val xs = p.extras.take(8)
         for (mask in 1 until (1 shl xs.size)) {
             if (xs.indices.sumOf { if ((mask shr it) and 1 == 1) xs[it] else 0L } == extra) return extra
         }
         return 0
+    }
+
+    /**
+     * Cùng 1 giao dịch (MB gửi lại / cập nhật thông báo): khớp TK, chiều, số tiền GD, số dư sau, giờ ghi trong text
+     * và ND (ND bị cắt vẫn khớp nếu là phần đầu của bên kia). Thiếu số dư hoặc giờ → không đủ chắc, false.
+     */
+    fun sameTx(a: Parsed, b: Parsed): Boolean =
+        a.time != null && a.balanceAfter != null && a.time == b.time && a.balanceAfter == b.balanceAfter &&
+            a.amount == b.amount && a.isIn == b.isIn && a.account == b.account && sameDescription(a.description, b.description)
+
+    private fun sameDescription(a: String?, b: String?): Boolean {
+        // Bỏ dấu "…"/"..." ở cuối bản bị cắt
+        val x = a.orEmpty().trimEnd('…', '.', ' ')
+        val y = b.orEmpty().trimEnd('…', '.', ' ')
+        return x.startsWith(y) || y.startsWith(x)
     }
 }

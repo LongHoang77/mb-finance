@@ -5,20 +5,27 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Canvas
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.text.SpannableString
+import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
+import android.text.style.ImageSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.text.NumberFormat
@@ -33,17 +40,30 @@ class Ui(private val ctx: Context) {
     val night = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
 
-    val bg = c(0xFFF3F5F9, 0xFF0E1014)
-    val surface = c(0xFFFFFFFF, 0xFF1A1D23)
-    val fg = c(0xFF111827, 0xFFE8EAED)
-    val muted = c(0xFF6B7280, 0xFF9AA0A6)
-    val line = c(0xFFE5E7EB, 0xFF2A2E35)
-    val primary = c(0xFF1D4ED8, 0xFF8AA8FF)
-    val onPrimary = c(0xFFFFFFFF, 0xFF0B1220)
-    val primarySoft = c(0xFFE3EAFE, 0xFF1F2940)
-    val green = c(0xFF15803D, 0xFF4ADE80)
-    val red = c(0xFFDC2626, 0xFFF87171)
-    val warn = c(0xFFB45309, 0xFFFCD34D)
+    val bg = c(0xFFF4F6FA, 0xFF0A0D13)
+    val surface = c(0xFFFFFFFF, 0xFF131823)
+    /** Nền ô nhập, khối phụ trong card. */
+    val surface2 = c(0xFFF1F4F9, 0xFF1A2030)
+    /** Phần được chọn nổi trên [surface2] (segmented). */
+    val raised = c(0xFFFFFFFF, 0xFF2A3245)
+    val fg = c(0xFF0F172A, 0xFFE6EAF2)
+    val muted = c(0xFF64748B, 0xFF8B95A7)
+    val line = c(0xFFE7EBF2, 0xFF232A3A)
+    val primary = c(0xFF2563EB, 0xFF7AA2FF)
+    val onPrimary = c(0xFFFFFFFF, 0xFF0A1226)
+    val primarySoft = c(0xFFE8F0FE, 0xFF1A2544)
+    val green = c(0xFF059669, 0xFF34D399)
+    val red = c(0xFFE11D48, 0xFFFB7185)
+    val warn = c(0xFFD97706, 0xFFFBBF24)
+
+    /** Gradient thẻ chính, cùng tông icon app; thẻ tiền mặt dùng tông xanh lá. */
+    val heroStart = c(0xFF3B82F6, 0xFF2563EB)
+    val heroEnd = c(0xFF1E3A8A, 0xFF172554)
+    val cashStart = c(0xFF10B981, 0xFF059669)
+    val cashEnd = c(0xFF065F46, 0xFF064E3B)
+    val onHero = 0xFFFFFFFF.toInt()
+
+    val medium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
     private fun c(light: Long, dark: Long) = (if (night) dark else light).toInt()
 
@@ -77,16 +97,24 @@ class Ui(private val ctx: Context) {
         if (stroke != null) setStroke(dp(1), stroke)
     }
 
+    fun oval(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+    }
+
+    fun gradient(start: Int, end: Int, radius: Int = 24) =
+        GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(start, end)).apply { cornerRadius = dp(radius).toFloat() }
+
     fun pressable(color: Int, radius: Int, stroke: Int? = null) =
         RippleDrawable(ColorStateList.valueOf(fg and 0x22FFFFFF), rounded(color, radius, stroke), null)
 
-    /** Bản nhạt (alpha ~20%) của [color], làm nền cho chip/nhãn. */
-    fun soft(color: Int) = (color and 0x00FFFFFF) or 0x33000000
+    /** Bản nhạt của [color] (mặc định alpha ~15%), làm nền cho chip/nhãn/icon. */
+    fun soft(color: Int, alpha: Int = 0x26) = (color and 0x00FFFFFF) or (alpha shl 24)
 
     /** Nền bottom sheet: chỉ bo 2 góc trên. */
     fun sheet() = GradientDrawable().apply {
         setColor(surface)
-        val r = dp(24).toFloat()
+        val r = dp(28).toFloat()
         cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
     }
 
@@ -95,18 +123,60 @@ class Ui(private val ctx: Context) {
         setSpan(ForegroundColorSpan(color), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
+    /** [s] kèm icon [res] màu [color] đứng trước, căn giữa theo dòng chữ. */
+    fun iconText(res: Int, s: CharSequence, color: Int, size: Int = 16): CharSequence {
+        val d = drawable(res, color, size)
+        return SpannableStringBuilder(" ").apply {
+            setSpan(CenteredImageSpan(d), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            append("  ").append(s)
+        }
+    }
+
+    fun drawable(res: Int, color: Int, size: Int): Drawable = ctx.getDrawable(res)!!.mutate().apply {
+        setTint(color)
+        setBounds(0, 0, dp(size), dp(size))
+    }
+
+    /** bold = chữ đậm vừa (medium), nhìn gọn hơn bold hệ thống. */
     fun text(s: CharSequence, size: Float, color: Int = fg, bold: Boolean = false) = TextView(ctx).apply {
         text = s
         setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
         setTextColor(color)
-        if (bold) typeface = Typeface.DEFAULT_BOLD
+        if (bold) typeface = medium
+        includeFontPadding = false
+        setLineSpacing(dp(2).toFloat(), 1f)
+    }
+
+    /** Số tiền: chữ số đều nhau để các cột số thẳng hàng, 1 dòng. */
+    fun amount(n: Long, size: Float, color: Int = fg, signed: Boolean = false) = text(money(n, signed), size, color, bold = true).apply {
+        fontFeatureSettings = "tnum"
+        if (size >= 22f) letterSpacing = -0.02f
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     fun vbox() = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
 
-    fun card(radius: Int = 18, color: Int = surface) = vbox().apply {
-        background = rounded(color, radius)
-        setPadding(dp(16), dp(14), dp(16), dp(14))
+    /** Card nền [surface] có viền mảnh; màu khác (vd [surface2]) thì không viền. */
+    fun card(radius: Int = 20, color: Int = surface) = vbox().apply {
+        background = rounded(color, radius, stroke = if (color == surface) line else null)
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+    }
+
+    /** Thẻ chính nền gradient, chữ trắng ([onHero]). */
+    fun hero(start: Int = heroStart, end: Int = heroEnd) = vbox().apply {
+        background = gradient(start, end)
+        setPadding(dp(20), dp(20), dp(20), dp(20))
+    }
+
+    /** Tiêu đề card, có thể kèm hành động chữ xanh bên phải. */
+    fun header(title: String, action: String? = null, onAction: (() -> Unit)? = null): View {
+        val right: View = if (action == null) View(ctx) else text(action, 13f, primary, bold = true).apply {
+            setPadding(dp(8), dp(6), dp(4), dp(6))
+            background = pressable(surface, 8)
+            setOnClickListener { onAction?.invoke() }
+        }
+        return split(text(title, 16f, bold = true), right)
     }
 
     /** Thêm [v] vào cột, cách view phía trên [gap] dp. */
@@ -116,24 +186,63 @@ class Ui(private val ctx: Context) {
 
     fun divider() = View(ctx).apply { setBackgroundColor(line) }
 
-    fun button(s: String, filled: Boolean = true, onClick: () -> Unit) = TextView(ctx).apply {
-        text = s
-        gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(if (filled) onPrimary else primary)
-        background = pressable(if (filled) primary else primarySoft, 12)
-        setPadding(dp(14), dp(11), dp(14), dp(11))
-        setOnClickListener { onClick() }
+    fun icon(res: Int, color: Int, size: Int = 20) = ImageView(ctx).apply {
+        setImageResource(res)
+        imageTintList = ColorStateList.valueOf(color)
+        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
     }
+
+    /** Ô tròn [size]dp nền nhạt màu [color], icon [res] ở giữa. */
+    fun iconCircle(res: Int, color: Int, size: Int = 40, fill: Int = soft(color)) = FrameLayout(ctx).apply {
+        background = oval(fill)
+        val s = size * 11 / 20
+        addView(icon(res, color, s), FrameLayout.LayoutParams(dp(s), dp(s), Gravity.CENTER))
+        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
+    }
+
+    /** Ô tròn chữ cái đầu của [name] (avatar tag). */
+    fun letterCircle(name: String, color: Int, size: Int = 40) = text(name.trim().take(1).uppercase(), size * 0.4f, color, bold = true).apply {
+        gravity = Gravity.CENTER
+        background = oval(soft(color))
+        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
+    }
+
+    /**
+     * Nút cao 48dp. [filled]: nền xanh chữ trắng; không thì nền xanh nhạt. [danger]: chữ đỏ nền đỏ nhạt.
+     * [icon] hiện trước chữ.
+     */
+    fun button(s: String, filled: Boolean = true, icon: Int? = null, danger: Boolean = false, onClick: () -> Unit) =
+        TextView(ctx).apply {
+            val color = when {
+                danger -> red
+                filled -> onPrimary
+                else -> primary
+            }
+            text = if (icon == null) s else iconText(icon, s, color, 18)
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = medium
+            setTextColor(color)
+            background = pressable(
+                when {
+                    danger -> soft(red, 0x1A)
+                    filled -> primary
+                    else -> primarySoft
+                },
+                14,
+            )
+            minHeight = dp(48)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setOnClickListener { onClick() }
+        }
 
     fun chip(s: String, selected: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
         text = s
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        setTextColor(if (selected) onPrimary else fg)
-        if (selected) typeface = Typeface.DEFAULT_BOLD
-        background = pressable(if (selected) primary else surface, 20)
-        setPadding(dp(14), dp(7), dp(14), dp(7))
+        setTextColor(if (selected) primary else fg)
+        if (selected) typeface = medium
+        background = pressable(if (selected) primarySoft else surface, 20, stroke = if (selected) primary else line)
+        setPadding(dp(14), dp(8), dp(14), dp(8))
         setOnClickListener { onClick() }
     }
 
@@ -141,19 +250,49 @@ class Ui(private val ctx: Context) {
     fun tagChip(name: String, color: Int?, selected: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
         text = if (color == null) name else dotLabel(name, color)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        setTextColor(fg)
-        if (selected) typeface = Typeface.DEFAULT_BOLD
+        setTextColor(if (color == null && !selected) primary else fg)
+        if (selected) typeface = medium
         val c = color ?: primary
         background = pressable(if (selected) soft(c) else surface, 20, stroke = if (selected) c else line)
-        setPadding(dp(12), dp(7), dp(12), dp(7))
+        setPadding(dp(12), dp(8), dp(12), dp(8))
         setOnClickListener { onClick() }
+    }
+
+    /** Chọn 1 trong vài lựa chọn: thanh nền [surface2], ô được chọn nổi lên. */
+    fun segmented(labels: List<String>, selected: Int, onPick: (Int) -> Unit) = LinearLayout(ctx).apply {
+        background = rounded(surface2, 14)
+        setPadding(dp(4), dp(4), dp(4), dp(4))
+        labels.forEachIndexed { i, s ->
+            val on = i == selected
+            addView(text(s, 14f, if (on) fg else muted, bold = on).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(9), dp(6), dp(9))
+                background = if (on) rounded(raised, 11, stroke = if (night) null else line) else pressable(surface2, 11)
+                setOnClickListener { if (!on) onPick(i) }
+            }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
+    }
+
+    /** Hộp ghi chú có icon, nền nhạt màu [color]. */
+    fun callout(res: Int, s: CharSequence, color: Int) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        background = rounded(soft(color, 0x1A), 14)
+        setPadding(dp(12), dp(11), dp(12), dp(11))
+        addView(icon(res, color, 18), LinearLayout.LayoutParams(dp(18), dp(18)).apply { topMargin = dp(1) })
+        addView(text(s, 13f, fg), LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = dp(10) })
+    }
+
+    /** Nhãn nhỏ dạng viên thuốc. */
+    fun pill(s: CharSequence, color: Int) = text(s, 11f, color, bold = true).apply {
+        background = rounded(soft(color, 0x22), 8)
+        setPadding(dp(8), dp(3), dp(8), dp(3))
     }
 
     /** Thanh tỉ lệ ngang, [fraction] trong 0..1. */
     fun bar(fraction: Float, color: Int) = LinearLayout(ctx).apply {
-        background = rounded(line, 4)
-        addView(View(ctx).apply { background = rounded(color, 4) }, LinearLayout.LayoutParams(0, dp(6), fraction))
-        addView(View(ctx), LinearLayout.LayoutParams(0, dp(6), 1f - fraction))
+        background = rounded(surface2, 4)
+        addView(View(ctx).apply { background = rounded(color, 4) }, LinearLayout.LayoutParams(0, dp(8), fraction))
+        addView(View(ctx), LinearLayout.LayoutParams(0, dp(8), 1f - fraction))
     }
 
     fun flow() = Flow(ctx, dp(8))
@@ -161,11 +300,11 @@ class Ui(private val ctx: Context) {
     fun input(hintText: String) = EditText(ctx).apply {
         hint = hintText
         setSingleLine()
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
         setTextColor(fg)
         setHintTextColor(muted)
-        background = rounded(bg, 12, stroke = line)
-        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = rounded(surface2, 14)
+        setPadding(dp(14), dp(13), dp(14), dp(13))
     }
 
     /** Hàng ngang chia đều chiều rộng. */
@@ -185,9 +324,32 @@ class Ui(private val ctx: Context) {
         addView(right, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(12) })
     }
 
+    /** [lead] (icon/avatar) + cột chữ [body] + [trail] bên phải, căn giữa theo chiều dọc. */
+    fun listRow(lead: View?, body: View, trail: View?) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        if (lead != null) addView(lead)
+        addView(body, LinearLayout.LayoutParams(0, WRAP, 1f).apply { if (lead != null) marginStart = dp(12) })
+        if (trail != null) addView(trail, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(12) })
+    }
+
     companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    }
+}
+
+/** ImageSpan căn giữa theo chiều cao chữ (ALIGN_CENTER chỉ có từ API 29). */
+private class CenteredImageSpan(d: Drawable) : ImageSpan(d) {
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int, x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        val d = drawable
+        val fm = paint.fontMetricsInt
+        canvas.save()
+        canvas.translate(x, (y + (fm.descent + fm.ascent) / 2 - d.bounds.bottom / 2).toFloat())
+        d.draw(canvas)
+        canvas.restore()
     }
 }
 
@@ -242,6 +404,11 @@ class MonthBars(
 ) : View(ctx) {
 
     private val bar = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ui.line
+        strokeWidth = ui.dp(1).toFloat()
+        pathEffect = DashPathEffect(floatArrayOf(ui.dp(4).toFloat(), ui.dp(4).toFloat()), 0f)
+    }
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = ui.dp(11).toFloat()
         textAlign = Paint.Align.CENTER
@@ -249,44 +416,50 @@ class MonthBars(
     private val rect = RectF()
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(widthSpec), ui.dp(160))
+        setMeasuredDimension(MeasureSpec.getSize(widthSpec), ui.dp(168))
     }
 
     override fun onDraw(canvas: Canvas) {
         if (data.isEmpty()) return
-        val base = (height - ui.dp(22)).toFloat()
-        val top = ui.dp(4).toFloat()
+        val base = (height - ui.dp(26)).toFloat()
+        val top = ui.dp(8).toFloat()
         val peak = max(1L, data.maxOf { max(it.totalIn, it.totalOut) })
         val slot = width.toFloat() / data.size
-        val w = min(slot * 0.3f, ui.dp(16).toFloat())
-        val gap = ui.dp(2).toFloat()
+        val w = min(slot * 0.26f, ui.dp(14).toFloat())
+        val gap = ui.dp(3).toFloat()
 
+        for (k in 0..2) {
+            val y = top + (base - top) * k / 3
+            canvas.drawLine(0f, y, width.toFloat(), y, grid)
+        }
         bar.color = ui.line
+        bar.alpha = 255
         canvas.drawRect(0f, base, width.toFloat(), base + ui.dp(1), bar)
 
         data.forEachIndexed { i, m ->
             val cx = slot * i + slot / 2
             val on = m.month == selected
             if (on) {
-                bar.color = ui.primarySoft
-                rect.set(slot * i + gap, 0f, slot * (i + 1) - gap, base)
-                canvas.drawRoundRect(rect, ui.dp(8).toFloat(), ui.dp(8).toFloat(), bar)
+                bar.color = ui.soft(ui.primary, 0x1A)
+                bar.alpha = 255
+                rect.set(slot * i + gap, 0f, slot * (i + 1) - gap, height.toFloat())
+                canvas.drawRoundRect(rect, ui.dp(12).toFloat(), ui.dp(12).toFloat(), bar)
             }
             column(canvas, cx - w - gap / 2, w, m.totalIn, peak, top, base, ui.green, on)
             column(canvas, cx + gap / 2, w, m.totalOut, peak, top, base, ui.red, on)
-            label.color = if (on) ui.fg else ui.muted
-            label.isFakeBoldText = on
-            canvas.drawText("T${m.month.monthValue}", cx, height - ui.dp(6).toFloat(), label)
+            label.color = if (on) ui.primary else ui.muted
+            label.typeface = if (on) ui.medium else Typeface.DEFAULT
+            canvas.drawText("T${m.month.monthValue}", cx, height - ui.dp(8).toFloat(), label)
         }
     }
 
     private fun column(c: Canvas, left: Float, w: Float, v: Long, peak: Long, top: Float, base: Float, color: Int, on: Boolean) {
         if (v <= 0) return
-        val h = max(ui.dp(3).toFloat(), (v.toDouble() / peak * (base - top)).toFloat())
+        val h = max(ui.dp(4).toFloat(), (v.toDouble() / peak * (base - top)).toFloat())
         bar.color = color
-        bar.alpha = if (on) 255 else 120
+        bar.alpha = if (on) 255 else 110
         rect.set(left, base - h, left + w, base)
-        c.drawRoundRect(rect, w / 3, w / 3, bar)
+        c.drawRoundRect(rect, w / 2, w / 2, bar)
     }
 
     @SuppressLint("ClickableViewAccessibility")
