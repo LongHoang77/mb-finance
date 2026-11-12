@@ -2,6 +2,7 @@ package vn.mbfinance.tracker
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.DatabaseUtils
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
@@ -15,7 +16,7 @@ import java.util.UUID
  * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
  * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 5) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 6) {
 
     /** Tăng khi dữ liệu đổi mà số dòng queue không đổi (thay nội dung, tính lại) → [dataKey] đổi. */
     @Volatile
@@ -79,6 +80,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         createTransactions(db)
         createTags(db)
         createBalanceCheck(db)
+        createPlans(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -88,6 +90,17 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         if (oldVersion < 3) createTags(db)
         // v4 (dọn bản trùng) giờ do reparseAll làm khi Parser.VERSION tăng
         if (oldVersion < 5) createBalanceCheck(db)
+        if (oldVersion < 6) createPlans(db)
+    }
+
+    /** v6 khoản lớn: plans (cọc/trả dần hoặc mục tiêu tiết kiệm), plan_tx gắn giao dịch theo queue_id như tag. */
+    private fun createPlans(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE plans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL, " +
+                "target INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)"
+        )
+        db.execSQL("CREATE TABLE plan_tx (queue_id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL)")
+        db.execSQL("CREATE INDEX idx_plan_tx_plan ON plan_tx(plan_id)")
     }
 
     /**
@@ -271,7 +284,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         try {
             val at = position(db, queueId)
             db.execSQL("UPDATE queue SET status = '$DELETED' WHERE id = ?", args)
-            for (table in listOf("transactions", "tx_tags", "confirmed_fees")) db.delete(table, "queue_id = ?", args)
+            for (table in listOf("transactions", "tx_tags", "confirmed_fees", "plan_tx")) db.delete(table, "queue_id = ?", args)
             // Giao dịch sau nó đổi số dư liền trước → đối soát lại
             if (at != null) resettle(db, at.first, at.second)
             db.setTransactionSuccessful()
@@ -445,7 +458,11 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                     "INSERT OR IGNORE INTO tx_tags(queue_id, tag_id) SELECT ?, tag_id FROM tx_tags WHERE queue_id = ?",
                     arrayOf<Any>(keep.id, r.seen.id),
                 )
-                for (table in listOf("tx_tags", "confirmed_fees", "transactions")) db.delete(table, "queue_id = ?", args)
+                db.execSQL(
+                    "INSERT OR IGNORE INTO plan_tx(queue_id, plan_id) SELECT ?, plan_id FROM plan_tx WHERE queue_id = ?",
+                    arrayOf<Any>(keep.id, r.seen.id),
+                )
+                for (table in listOf("tx_tags", "confirmed_fees", "plan_tx", "transactions")) db.delete(table, "queue_id = ?", args)
                 db.delete("queue", "id = ?", args)
                 removed++
                 if (richer(r.seen, best)) kept[i] = keep to r.seen
@@ -635,11 +652,14 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             """
             SELECT t.queue_id, t.amount, t.direction, t.balance_after, t.account, t.description,
                    t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text, g.id, g.name, g.color,
-                   q.package = '$MANUAL', t.gap, f.queue_id IS NOT NULL, t.fee
+                   q.package = '$MANUAL', t.gap, f.queue_id IS NOT NULL, t.fee,
+                   p.id, p.name, p.kind, p.target, p.done
             FROM transactions t JOIN queue q ON q.id = t.queue_id
             LEFT JOIN tx_tags tt ON tt.queue_id = t.queue_id
             LEFT JOIN tags g ON g.id = tt.tag_id
             LEFT JOIN confirmed_fees f ON f.queue_id = t.queue_id
+            LEFT JOIN plan_tx pt ON pt.queue_id = t.queue_id
+            LEFT JOIN plans p ON p.id = pt.plan_id
             WHERE q.package IN (?, '$MANUAL')
             ORDER BY t.tx_time DESC, t.queue_id DESC
             """.trimIndent(),
@@ -662,6 +682,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         gap = if (c.isNull(15)) null else c.getLong(15),
                         feeConfirmed = c.getInt(16) == 1,
                         fee = c.getLong(17),
+                        plan = if (c.isNull(18)) null else plan(c, 18),
                     )
                 )
             }
@@ -676,7 +697,9 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.rawQuery(
             """
             SELECT t.direction, SUM(t.amount) FROM transactions t JOIN queue q ON q.id = t.queue_id
-            WHERE q.package IN (?, '$MANUAL') AND t.tx_year = ? AND t.tx_month = ? GROUP BY t.direction
+            WHERE q.package IN (?, '$MANUAL') AND t.tx_year = ? AND t.tx_month = ?
+              AND NOT (t.direction = 'out' AND t.queue_id IN ($SAVING_TX))
+            GROUP BY t.direction
             """.trimIndent(),
             arrayOf(pkg, month.year.toString(), month.monthValue.toString()),
         ).use { c ->
@@ -736,6 +759,13 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     fun recent(limit: Int): List<Item> = query("WHERE package != '$MANUAL' ORDER BY id DESC LIMIT $limit")
 
+    /** Thông báo đã lưu (không gồm giao dịch nhập tay) nhận trong [[from], [to]), mới nhất trước. */
+    fun notifications(from: Long, to: Long): List<Item> =
+        query(
+            "WHERE package != '$MANUAL' AND posted_at >= ? AND posted_at < ? ORDER BY posted_at DESC",
+            arrayOf(from.toString(), to.toString()),
+        )
+
     /** Đổi mỗi khi hàng đợi có bản ghi mới/bị xoá hoặc dữ liệu được tính lại — dùng để biết khi nào cần tính lại thống kê. */
     fun dataKey(): String =
         readableDatabase.rawQuery("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM queue", null).use { c ->
@@ -764,6 +794,72 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         return out
     }
 
+    // ------------------------------------------------------------------ khoản lớn (cọc / tiết kiệm)
+
+    /** Đọc Plan từ 5 cột id, name, kind, target, done bắt đầu ở [i]. */
+    private fun plan(c: Cursor, i: Int) =
+        Plan(c.getLong(i), c.getString(i + 1), c.getString(i + 2) == SAVE, c.getLong(i + 3), c.getInt(i + 4) == 1)
+
+    /** Mọi khoản: đang mở trước, mới tạo trước. */
+    fun plans(): List<Plan> {
+        val out = ArrayList<Plan>()
+        readableDatabase.rawQuery("SELECT id, name, kind, target, done FROM plans ORDER BY done, created_at DESC, id DESC", null)
+            .use { c -> while (c.moveToNext()) out.add(plan(c, 0)) }
+        return out
+    }
+
+    fun addPlan(name: String, saving: Boolean, target: Long): Plan {
+        val cv = ContentValues().apply {
+            put("name", name.trim())
+            put("kind", if (saving) SAVE else PAY)
+            put("target", target)
+            put("created_at", System.currentTimeMillis())
+        }
+        val id = writableDatabase.insertOrThrow("plans", null, cv)
+        revision++
+        return Plan(id, name.trim(), saving, target, false)
+    }
+
+    fun updatePlan(id: Long, name: String, saving: Boolean, target: Long) {
+        val cv = ContentValues().apply {
+            put("name", name.trim())
+            put("kind", if (saving) SAVE else PAY)
+            put("target", target)
+        }
+        writableDatabase.update("plans", cv, "id = ?", arrayOf(id.toString()))
+        revision++
+    }
+
+    fun setPlanDone(id: Long, done: Boolean) {
+        writableDatabase.execSQL("UPDATE plans SET done = ? WHERE id = ?", arrayOf<Any>(if (done) 1 else 0, id))
+        revision++
+    }
+
+    /** Xoá khoản; giao dịch đã gắn vẫn giữ, chỉ gỡ liên kết. */
+    fun deletePlan(id: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("plan_tx", "plan_id = ?", arrayOf(id.toString()))
+            db.delete("plans", "id = ?", arrayOf(id.toString()))
+            db.setTransactionSuccessful()
+            revision++
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Gắn giao dịch [queueId] vào khoản [planId]; null = gỡ. */
+    fun setPlan(queueId: Long, planId: Long?) {
+        val db = writableDatabase
+        if (planId == null) {
+            db.delete("plan_tx", "queue_id = ?", arrayOf(queueId.toString()))
+        } else {
+            db.execSQL("INSERT OR REPLACE INTO plan_tx(queue_id, plan_id) VALUES (?, ?)", arrayOf<Any>(queueId, planId))
+        }
+        revision++
+    }
+
     // ------------------------------------------------------------------ tag
 
     fun tags(): List<Tag> {
@@ -790,6 +886,10 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     fun renameTag(id: Long, name: String): Boolean {
         val cv = ContentValues().apply { put("name", name.trim()) }
         return writableDatabase.updateWithOnConflict("tags", cv, "id = ?", arrayOf(id.toString()), SQLiteDatabase.CONFLICT_IGNORE) > 0
+    }
+
+    fun recolorTag(id: Long, color: Int) {
+        writableDatabase.execSQL("UPDATE tags SET color = ? WHERE id = ?", arrayOf<Any>(color, id))
     }
 
     /** Xoá tag; các giao dịch đang gắn tag này trở về "chưa gắn tag". */
@@ -831,6 +931,13 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
         /** queue.package của giao dịch nhập tay. */
         private const val MANUAL = "manual"
+
+        /** plans.kind: mục tiêu tiết kiệm / đặt cọc, trả dần. */
+        private const val SAVE = "save"
+        private const val PAY = "pay"
+
+        /** queue_id của giao dịch gắn vào mục tiêu tiết kiệm (tách khỏi thu/chi). */
+        private const val SAVING_TX = "SELECT pt.queue_id FROM plan_tx pt JOIN plans p ON p.id = pt.plan_id WHERE p.kind = '$SAVE'"
 
         /** 2 thông báo cùng giao dịch (1 bản bị cắt) nhận cách nhau tối đa chừng này. */
         private const val NEAR_MS = 10 * 60_000L

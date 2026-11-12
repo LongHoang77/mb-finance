@@ -66,7 +66,8 @@ export function parseNotification(text: string): ParsedTx | null {
     direction: a[1] === '+' ? 'in' : 'out',
     balanceAfter: b ? toVnd(b[1]) : null,
     account: acc ? acc[1] : null,
-    description: desc ? desc[1].trim().replace(/\s+/g, ' ') : null,
+    // ND chỉ có khoảng trắng → coi như không có
+    description: desc ? desc[1].trim().replace(/\s+/g, ' ') || null : null,
     transactionTime: t ? toIsoUtc(t[1], t[2]) : null,
   };
 }

@@ -22,16 +22,24 @@ data class Tx(
     val gap: Long? = null, // lệch số dư so với giao dịch liền trước (> 0: thiếu, < 0: thừa), xem Store.settle
     val feeConfirmed: Boolean = false, // người dùng đã xác nhận khoản lệch là phí
     val fee: Long = 0, // phần phí/VAT đã cộng vào amount
-)
+    val plan: Plan? = null, // khoản cọc/trả dần hoặc mục tiêu tiết kiệm đang gắn
+) {
+    /** Tiền ra chuyển tiết kiệm: không phải chi tiêu, tách khỏi thống kê thu/chi. */
+    val saving get() = !isIn && plan?.saving == true
+}
 
 /** Tag thu chi do người dùng tự đặt; [color] là ARGB. */
 data class Tag(val id: Long, val name: String, val color: Int)
+
+/** Khoản lớn: [saving] = mục tiêu tiết kiệm, ngược lại = đặt cọc / trả dần; [target] = số tiền cần có / tổng giá. */
+data class Plan(val id: Long, val name: String, val saving: Boolean, val target: Long, val done: Boolean)
 
 /** Sổ giao dịch đọc từ bảng transactions trên máy (không cần server). */
 class Ledger(
     val txs: List<Tx>,
     val unparsed: List<Store.Item>,
     val checks: Map<YearMonth, List<Store.MonthCheck>> = emptyMap(), // đối soát số dư theo tháng, mỗi TK 1 dòng
+    val plans: List<Plan> = emptyList(), // đang mở trước, mới tạo trước
 ) {
 
     data class MonthSum(
@@ -40,11 +48,14 @@ class Ledger(
         val totalOut: Long,
         val countIn: Int,
         val countOut: Int,
+        val saved: Long = 0, // chuyển tiết kiệm, không tính vào totalOut
     ) {
         val net get() = totalIn - totalOut
     }
 
     private val byMonth = txs.groupBy { YearMonth.from(it.date) }
+
+    private val byPlan = txs.filter { it.plan != null }.groupBy { it.plan!!.id }
 
     /** Số dư theo thông báo mới nhất có ghi số dư. */
     val latestBalance: Long? = txs.firstOrNull { it.balanceAfter != null }?.balanceAfter
@@ -67,14 +78,24 @@ class Ledger(
 
     fun inMonth(m: YearMonth): List<Tx> = byMonth[m].orEmpty()
 
+    /** Giao dịch thu/chi thật trong tháng (bỏ tiền chuyển tiết kiệm). */
+    fun spending(m: YearMonth): List<Tx> = inMonth(m).filter { !it.saving }
+
     fun sum(m: YearMonth): MonthSum {
-        val (ins, outs) = inMonth(m).partition { it.isIn }
-        return MonthSum(m, ins.sumOf { it.amount }, outs.sumOf { it.amount }, ins.size, outs.size)
+        val (ins, outs) = spending(m).partition { it.isIn }
+        val saved = inMonth(m).filter { it.saving }.sumOf { it.amount }
+        return MonthSum(m, ins.sumOf { it.amount }, outs.sumOf { it.amount }, ins.size, outs.size, saved)
     }
+
+    /** Giao dịch đã gắn vào [p], mới nhất trước. */
+    fun txsOf(p: Plan): List<Tx> = byPlan[p.id].orEmpty()
+
+    /** Đã trả / đã để dành cho [p]: tổng tiền ra đã gắn, không tính phí. */
+    fun paid(p: Plan): Long = txsOf(p).filter { !it.isIn }.sumOf { it.amount - it.fee }
 
     /** Tổng tiền vào ([isIn]) hoặc ra theo tag trong tháng, lớn nhất trước; tag null = chưa gắn. */
     fun byTag(m: YearMonth, isIn: Boolean): List<Pair<Tag?, Long>> =
-        inMonth(m).filter { it.isIn == isIn }
+        spending(m).filter { it.isIn == isIn }
             .groupBy { it.tag }
             .map { (tag, list) -> tag to list.sumOf { it.amount } }
             .sortedByDescending { it.second }
@@ -113,6 +134,7 @@ class Ledger(
                 store.transactions(pkg),
                 store.unparsed(pkg).filter { Parser.looksLikeTransaction(it.text) },
                 store.monthChecks(pkg),
+                store.plans(),
             )
         }
     }

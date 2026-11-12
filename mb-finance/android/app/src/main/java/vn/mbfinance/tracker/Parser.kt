@@ -11,7 +11,7 @@ import java.time.ZoneOffset
 object Parser {
 
     /** Tăng mỗi khi sửa regex hoặc cách đối soát trùng/phí để app tự phân tích lại dữ liệu cũ. */
-    const val VERSION = 4
+    const val VERSION = 5
 
     data class Parsed(
         val amount: Long, // VND, luôn dương
@@ -78,7 +78,8 @@ object Parser {
             isIn = a.groupValues[1] == "+",
             balanceAfter = b?.let { toVnd(it.groupValues[1]) },
             account = ACCOUNT.find(text)?.groupValues?.get(1),
-            description = DESC.find(text)?.groupValues?.get(1)?.trim()?.replace(SPACES, " "),
+            // ND chỉ có khoảng trắng → coi như không có
+            description = DESC.find(text)?.groupValues?.get(1)?.trim()?.replace(SPACES, " ")?.ifEmpty { null },
             time = t?.let { toEpoch(it.groupValues[1], it.groupValues[2]) },
             extras = extras,
         )

@@ -11,8 +11,8 @@ android {
         applicationId = "vn.mbfinance.tracker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.2.1"
+        versionCode = 6
+        versionName = "1.3"
     }
 
     // Khoá ký cố định (nằm trong repo riêng tư) để mỗi lần build mới có thể cài đè bản cũ
