@@ -11,8 +11,8 @@ android {
         applicationId = "vn.mbfinance.tracker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.3.1"
+        versionCode = 8
+        versionName = "1.4"
     }
 
     // Khoá ký cố định (nằm trong repo riêng tư) để mỗi lần build mới có thể cài đè bản cũ
@@ -29,6 +29,8 @@ android {
     buildTypes {
         getByName("debug") {
             signingConfig = signingConfigs.getByName("debug")
+            // CI chỉ build bản debug: tắt debuggable để không đọc được dữ liệu app (DB, cookie) qua adb run-as
+            isDebuggable = false
         }
     }
 

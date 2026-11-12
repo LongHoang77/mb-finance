@@ -37,6 +37,10 @@ import android.widget.TextView
 import android.widget.Toast
 import vn.mbfinance.tracker.Ui.Companion.MATCH
 import vn.mbfinance.tracker.Ui.Companion.WRAP
+import vn.mbfinance.tracker.game.GameJob
+import vn.mbfinance.tracker.game.GameScreen
+import vn.mbfinance.tracker.game.GameSync
+import vn.mbfinance.tracker.game.Hoyolab
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.LocalDate
@@ -56,7 +60,14 @@ class MainActivity : Activity() {
     private lateinit var store: Store
     private lateinit var ui: Ui
 
+    private lateinit var headerTitle: TextView
     private lateinit var headerStatus: TextView
+    /** 2 module tách biệt: Tài chính (3 tab + nút +) và Game (GameScreen, package game/). */
+    private var module = MODULE_FINANCE
+    private lateinit var financeContent: View
+    private lateinit var financeNav: View
+    private lateinit var game: GameScreen
+    private val moduleButtons = ArrayList<Pair<View, ImageView>>()
     private lateinit var pages: List<ScrollView>
     private lateinit var overviewBox: LinearLayout
     private lateinit var txBox: LinearLayout
@@ -122,9 +133,16 @@ class MainActivity : Activity() {
             fitsSystemWindows = true
             setBackgroundColor(ui.bg)
         }
-        val header = ui.vbox().apply { setPadding(dp(20), dp(16), dp(20), dp(6)) }
-        header.addView(ui.text("Thu chi MB", 26f, bold = true).apply { letterSpacing = -0.02f })
-        headerStatus = ui.text("", 13f, ui.muted).also { ui.add(header, it, 4) }
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(16), dp(16), dp(6))
+        }
+        val titleCol = ui.vbox()
+        headerTitle = ui.text("Thu chi MB", 26f, bold = true).apply { letterSpacing = -0.02f }
+        titleCol.addView(headerTitle)
+        headerStatus = ui.text("", 13f, ui.muted).also { ui.add(titleCol, it, 4) }
+        header.addView(titleCol, LinearLayout.LayoutParams(0, WRAP, 1f))
+        header.addView(moduleSwitch())
         shell.addView(header)
 
         overviewBox = ui.vbox()
@@ -154,13 +172,19 @@ class MainActivity : Activity() {
             setMargins(0, 0, dp(20), dp(20))
         })
         shell.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
-        shell.addView(bottomNav())
+        game = GameScreen(this, ui)
+        shell.addView(game.root, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        financeContent = content
+        financeNav = bottomNav()
+        shell.addView(financeNav)
         setContentView(shell)
 
         buildSettings()
         renderData()
         selectTab(0)
         settings.dropServerConfig()
+        val prefs = getSharedPreferences("ui", MODE_PRIVATE)
+        selectModule(intent.getIntExtra(EXTRA_MODULE, prefs.getInt("module", MODULE_FINANCE)), show = false)
     }
 
     override fun onResume() {
@@ -168,6 +192,59 @@ class MainActivity : Activity() {
         handler.post(ticker)
         // Mở app = quét bù thông báo bị lỡ khi listener bị hệ thống ngắt
         thread { runCatching { MbNotificationListener.catchUp(applicationContext) } }
+        // Mở app cũng là dịp tự điểm danh bù (ROM hay giết tác vụ nền)
+        if (module == MODULE_GAME) {
+            game.onShow()
+        } else {
+            val app = applicationContext
+            thread {
+                runCatching {
+                    if (Hoyolab.loggedIn()) {
+                        GameJob.ensure(app)
+                        GameSync.run(app)
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ module
+
+    /** Nút chuyển module ở header: ví (Tài chính) | tay cầm (Game). */
+    private fun moduleSwitch(): View {
+        val wrap = LinearLayout(this).apply {
+            background = ui.rounded(ui.surface2, 22)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        listOf(R.drawable.ic_wallet to "Tài chính", R.drawable.ic_game to "Game").forEachIndexed { i, (res, label) ->
+            val icon = ui.icon(res, ui.muted, 22)
+            val btn = FrameLayout(this).apply {
+                contentDescription = label
+                addView(icon, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+                setOnClickListener { selectModule(i) }
+            }
+            moduleButtons.add(btn to icon)
+            wrap.addView(btn, LinearLayout.LayoutParams(dp(44), dp(36)))
+        }
+        return wrap
+    }
+
+    private fun selectModule(m: Int, show: Boolean = true) {
+        module = if (m == MODULE_GAME) MODULE_GAME else MODULE_FINANCE
+        val fin = module == MODULE_FINANCE
+        financeContent.visibility = if (fin) View.VISIBLE else View.GONE
+        financeNav.visibility = if (fin) View.VISIBLE else View.GONE
+        game.root.visibility = if (fin) View.GONE else View.VISIBLE
+        headerTitle.text = if (fin) "Thu chi MB" else "Honkai: Star Rail"
+        headerTitle.textSize = if (fin) 26f else 22f
+        headerStatus.visibility = if (fin) View.VISIBLE else View.GONE
+        moduleButtons.forEachIndexed { i, (btn, icon) ->
+            val on = i == module
+            btn.background = if (on) ui.rounded(ui.surface, 18) else null
+            icon.imageTintList = ColorStateList.valueOf(if (on) ui.primary else ui.muted)
+        }
+        getSharedPreferences("ui", MODE_PRIVATE).edit().putInt("module", module).apply()
+        if (!fin && show) game.onShow()
     }
 
     override fun onPause() {
@@ -2001,6 +2078,11 @@ class MainActivity : Activity() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     companion object {
+        /** Intent extra mở thẳng 1 module (vd chạm thông báo game). */
+        const val EXTRA_MODULE = "module"
+        const val MODULE_FINANCE = 0
+        const val MODULE_GAME = 1
+
         private const val UNTAGGED = -1L
         private const val TX_TAB = 1
         private const val SETTINGS_TAB = 2

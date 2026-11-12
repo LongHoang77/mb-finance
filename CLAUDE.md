@@ -2,7 +2,11 @@
 
 Đọc file này trước khi đọc code. Hướng dẫn vận hành (deploy, server, token, sao lưu) nằm ở [mb-finance/README.md](mb-finance/README.md) — chỉ mở khi cần.
 
-Dự án cá nhân, 1 người dùng: app Android đọc thông báo MB Bank → tự phân tích thành giao dịch, thống kê và gắn tag **hoàn toàn trên máy** (không gửi đi đâu, không có quyền INTERNET). Server + web bên dưới là phần cũ, app không còn gửi dữ liệu lên.
+Dự án cá nhân, 1 người dùng: app Android gồm 2 module tách biệt, chuyển bằng nút ở header (`MainActivity.selectModule`):
+- **Tài chính**: đọc thông báo MB Bank → tự phân tích thành giao dịch, thống kê và gắn tag **hoàn toàn trên máy** — code tài chính không bao giờ gọi mạng.
+- **Game** (package `game/`): Honkai: Star Rail qua HoYoLAB — tự điểm danh, sức mạnh khai phá, nhiệm vụ, ủy thác. Là phần DUY NHẤT dùng quyền INTERNET, mọi request đi qua `game/Net.kt` (chỉ HTTPS, allowlist host HoYoLAB, không theo redirect).
+
+Server + web bên dưới là phần cũ, app không còn gửi dữ liệu lên.
 
 ```
 Android (Kotlin)                Server (Node 22 + TS + Express + SQLite)        Web (React + Vite)
@@ -15,7 +19,7 @@ Toàn bộ code nằm trong `mb-finance/` (không phải gốc repo). Server + w
 
 ## Android — `mb-finance/android/app/src/main/java/vn/mbfinance/tracker/`
 
-Không dùng thư viện ngoài. minSdk 26. UI dựng bằng code, chỉ widget có XML layout; icon là vector drawable `res/drawable/ic_*.xml` (Material Icons, tô màu trong code).
+Không dùng thư viện ngoài (mạng = `HttpsURLConnection`, JSON = `org.json`, chạy nền = `JobScheduler`/`AlarmManager`). minSdk 26. Bản build (kể cả debug của CI) đặt `isDebuggable = false`; `network_security_config.xml` chặn cleartext và chỉ tin CA hệ thống. UI dựng bằng code, chỉ widget có XML layout; icon là vector drawable `res/drawable/ic_*.xml` (Material Icons, tô màu trong code).
 
 | File | Vai trò |
 |---|---|
@@ -29,6 +33,19 @@ Không dùng thư viện ngoài. minSdk 26. UI dựng bằng code, chỉ widget 
 | `MainActivity.kt` | 3 tab dựng bằng code: **Tổng quan** (gọn, `renderOverview`: chọn tháng; thẻ chính = số dư tổng / ngân hàng / tiền mặt + vào / ra / chênh lệch tháng — chạm để sang Giao dịch lọc sẵn — + 1 dòng `checkSummary` đối soát, chạm → `showChecks` (bảng `monthCheckCard`, chạm callout xem giao dịch lệch); thẻ "Mục tiêu & khoản cọc" (`plansCard`: callout gợi ý trả nốt chạm → chi tiết giao dịch, tối đa 3 khoản, "Xem tất cả" → `showPlanList`, "+ Thêm" → `showPlanForm`, chạm → `showPlan`); theo tag (`DonutChart` vành khuyên + chú thích tên/số tiền/%, top 5 + "Khác", `tagsExpanded` để xem hết; chạm phần biểu đồ để xem nhanh, chạm dòng chú thích để lọc); biểu đồ 6 tháng; 5 giao dịch gần đây), **Giao dịch** (ngân hàng + tiền mặt chung 1 danh sách: lọc nguồn `Source` + vào/ra + tag, nhóm theo ngày, lọc Tiền mặt thì hiện tiền mặt hiện có, thông báo không đọc được), nút nổi "+" (ở Tổng quan và Giao dịch) → `showManualForm` thêm/sửa giao dịch tay (mẫu gần đây, số tiền nhanh, Hôm nay/Hôm qua, chọn ngày giờ, mặc định cuối tháng đang xem nếu là tháng cũ, tag lần trước), **Cài đặt** (quyền, bảng tag `renderTagSettings`: tag · số GD · chi/thu tháng đang xem + chưa gắn + tổng, chạm → `showTag` thống kê / đổi màu / đổi tên / xem giao dịch / xoá; mục Thông báo gồm 2 dòng `navRow`: "App ngân hàng" → `showSources` chọn package, "Nhật ký thông báo" → `showNotifLog` toàn màn hình (thanh tiêu đề + dải 14 ngày kèm số thông báo cố định ở trên, nút lịch chọn ngày xa hơn, danh sách cuộn bên dưới, `Store.notifications`); số dư thực tế (`showMarkForm`/`renderMarks`, chạm để xoá), quét lại thông báo, kiểm tra lại dữ liệu đã lưu = `catchUp` + `reparseAll` + báo số bản trùng đã xoá / giao dịch có phí / lệch số dư). Chạm giao dịch → bottom sheet chi tiết (gắn/bỏ tag, tạo tag mới, tách GD + phí/VAT nếu có, giao dịch tiền ra: "Đánh dấu là cọc" → `showPlanForm(deposit=…)` nhập tên + tổng giá, "Chuyển tiết kiệm" / "Trả tiếp cho khoản cọc…" → `showPlanPicker`, gợi ý trả nốt → "Đúng, trả nốt" / "Không phải", gỡ khỏi khoản, lệch số dư + nút ghi nhận khoản lệch là phí / bỏ ghi nhận, thông báo gốc thu gọn, sửa giao dịch tay, xoá giao dịch có hỏi lại). Tick 3s: cập nhật trạng thái, `dataKey` đổi thì load lại `Ledger` ở luồng nền; đổi tag thì `reload()`. |
 
 App tự phân tích và lưu mọi thứ trên máy; không còn gửi lên server.
+
+### Module Game — `.../tracker/game/`
+
+| File | Vai trò |
+|---|---|
+| `Net.kt` | Điểm gọi mạng duy nhất: HTTPS tới `sg-public-api` / `bbs-api-os` / `api-account-os` `.hoyolab.com`, không redirect, giới hạn 1 MB. Thêm host mới phải sửa `ALLOWED`. |
+| `Hoyolab.kt` | API HoYoLAB không chính thức (theo hoyolab-auto-sign, genshin.py): cookie `ltoken_v2`/`ltuid_v2` lấy từ `CookieManager` của WebView (không lưu chỗ khác, không log); `roles` (getUserGameRolesByCookie, game_biz `hkrpg_global`), `note` (game_record/hkrpg/api/note + header `DS` = md5 salt overseas), `signInfo`/`sign`/`reward` (event/luna/os, act_id `e202303301540311`; retcode -5003 = đã điểm danh, `gt_result.is_risk` = captcha, -100/10001 = hết phiên). `serverOf(uid)` theo chữ số đầu UID. |
+| `GameStore.kt` | SharedPreferences `game`: nhân vật, JSON ghi chú + giờ đọc, trạng thái điểm danh (ngày theo UTC+8), cài đặt (tự điểm danh, nhắc trước X phút), `staminaAt` ước tính (1 điểm / 6 phút tính ngược từ giờ đầy). |
+| `GameSync.kt` | `run(force, forceSign)` (synchronized, luồng nền): lấy nhân vật → điểm danh nếu hôm nay (UTC+8) chưa → đọc ghi chú (cache 5 phút) → `GameAlarm.schedule`; lỗi lưu `lastError`, hết phiên/captcha nhắc tối đa 1 lần/ngày. Gọi khi mở app, mở module Game, `GameJob`. |
+| `GameJob.kt` | `JobService` định kỳ 3 giờ khi có mạng, persisted (`RECEIVE_BOOT_COMPLETED`); `ensure` chỉ đặt nếu chưa có. |
+| `GameAlarm.kt` | `BroadcastReceiver` + `AlarmManager.setAndAllowWhileIdle`: nhắc "sắp đầy" theo `notifyBefore`, 1 lần mỗi lần đầy (`notified`). |
+| `GameNotify.kt` | Kênh thông báo "game" (cần `POST_NOTIFICATIONS` từ Android 13), chạm → `MainActivity` với `EXTRA_MODULE = MODULE_GAME`. |
+| `GameScreen.kt` | UI module Game: đăng nhập (WebView toàn màn hình, chỉ điều hướng HTTPS trong `hoyolab.com`/`hoyoverse.com`, không JS bridge, không file access), thẻ tài khoản + làm mới, sức mạnh khai phá (giờ đầy, dự trữ), nhiệm vụ ngày/tuần, ủy thác, điểm danh (captcha → mở trang điểm danh), cài đặt, đăng xuất (xoá cookie + WebStorage + `GameStore`, huỷ job/alarm). |
 
 APK build bằng GitHub Actions (`.github/workflows/android.yml`) khi `android/` thay đổi. `android/app/debug.keystore` là khoá ký cố định, cố ý commit vào repo.
 
@@ -62,6 +79,8 @@ API phản hồi `accepted[].status` ∈ `parsed | unparsed | ignored | duplicat
 - `status.sh`, `setup-dev.sh`, `send-sample.sh` (gửi dữ liệu giả, **chỉ dùng ở máy local**).
 
 ## Những chỗ dễ sai khi sửa
+
+- Không gọi mạng từ code tài chính; mọi request phải qua `game/Net.kt` (allowlist). Không log cookie HoYoLAB hay nội dung giao dịch.
 
 - Đổi schema app: tăng version trong `Store` và thêm nhánh `if (oldVersion < N)` trong `onUpgrade`, không sửa bảng cũ trong `onCreate` mà quên migration.
 - Sửa parser → sửa cả `parser.ts` và `android/.../Parser.kt`, thêm mẫu vào `parser.test.ts` → deploy → chạy `reparse` trên server (app tự áp dụng khi cài bản mới).

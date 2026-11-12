@@ -3,6 +3,12 @@
 
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Chỉ module Game dùng mạng (HoYoLAB, xem game/Net.kt); module tài chính không gọi mạng -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Giữ lịch tự điểm danh (GameJob) sau khi khởi động lại máy -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- Để hiện tên app (vd "MB Bank") trong danh sách nguồn thông báo -->
     <queries>
         <intent>
@@ -13,6 +19,8 @@
 
     <application
         android:allowBackup="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="Thu chi MB"
@@ -38,6 +46,15 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <service
+            android:name=".game.GameJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <receiver
+            android:name=".game.GameAlarm"
+            android:exported="false" />
 
         <receiver
             android:name=".BalanceWidget"
