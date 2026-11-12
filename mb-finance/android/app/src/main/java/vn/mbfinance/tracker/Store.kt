@@ -147,7 +147,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     /**
      * Lưu thông báo + giao dịch phân tích được. Trả về false nếu đã có: cùng app + nội dung + thời điểm,
-     * trùng một giao dịch đã lưu hoặc đã xoá (xem [Parser.sameTx]).
+     * trùng một giao dịch đã lưu hoặc đã xoá (xem [sameTx]).
      * Bản trùng đầy đủ hơn bản đã lưu (bản trước bị cắt) → thay nội dung bản đã lưu, trả về true.
      */
     fun enqueue(pkg: String, title: String?, text: String, postedAt: Long): Boolean {
@@ -164,10 +164,11 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.beginTransaction()
         try {
             if (p != null) {
-                if (isDeleted(db, pkg, p)) return false
-                val same = findSame(db, pkg, p)
+                val mine = Seen(0, body, postedAt, p)
+                if (isDeleted(db, pkg, mine)) return false
+                val same = findSame(db, pkg, mine)
                 if (same != null) {
-                    if (body.length <= same.second.length || !replaceText(db, same.first, title, body, p)) return false
+                    if (!richer(mine, same) || !replaceText(db, same, title, mine)) return false
                     db.setTransactionSuccessful()
                     revision++
                     return true
@@ -186,50 +187,76 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         }
     }
 
-    /** Giao dịch đã lưu (chưa xoá) trùng [p] → (queue_id, text), null nếu không có. */
-    private fun findSame(db: SQLiteDatabase, pkg: String, p: Parser.Parsed): Pair<Long, String>? {
-        val time = p.time ?: return null
-        val balance = p.balanceAfter ?: return null
+    /** 1 thông báo giao dịch đã đọc: dòng queue [id] (0 = chưa lưu), nội dung, giờ máy nhận và kết quả phân tích. */
+    private data class Seen(val id: Long, val text: String, val postedAt: Long, val p: Parser.Parsed)
+
+    /**
+     * Cùng 1 giao dịch: đủ mọi trường và khớp ([Parser.sameTx]), hoặc 1 bản bị cắt ([Parser.partialSame])
+     * nhận gần nhau / cùng giờ ghi trong text.
+     */
+    private fun sameTx(a: Seen, b: Seen): Boolean =
+        Parser.sameTx(a.p, b.p) || (
+            (Math.abs(a.postedAt - b.postedAt) <= NEAR_MS || (a.p.time != null && a.p.time == b.p.time)) &&
+                Parser.partialSame(a.p, b.p)
+            )
+
+    /** [a] đầy đủ hơn [b]: đọc được nhiều trường hơn, bằng nhau thì nội dung dài hơn. */
+    private fun richer(a: Seen, b: Seen): Boolean {
+        val ca = Parser.completeness(a.p)
+        val cb = Parser.completeness(b.p)
+        return ca > cb || (ca == cb && a.text.length > b.text.length)
+    }
+
+    /** Giao dịch đã lưu (chưa xoá) trùng [s], null nếu không có. */
+    private fun findSame(db: SQLiteDatabase, pkg: String, s: Seen): Seen? {
+        // Ứng viên: nhận gần nhau hoặc cùng giờ ghi trong text; amount đã lưu có thể gồm phí → so trên thông báo gốc
         db.rawQuery(
             """
-            SELECT q.id, q.text FROM transactions t JOIN queue q ON q.id = t.queue_id
-            WHERE q.package = ? AND t.time_from_text = 1 AND t.tx_time = ? AND t.balance_after = ?
+            SELECT q.id, q.text, q.posted_at FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE q.package = ? AND t.direction = ? AND (q.posted_at BETWEEN ? AND ? OR t.tx_time = ?)
             """.trimIndent(),
-            arrayOf(pkg, time.toString(), balance.toString()),
+            arrayOf(
+                pkg, if (s.p.isIn) "in" else "out", (s.postedAt - NEAR_MS).toString(), (s.postedAt + NEAR_MS).toString(),
+                (s.p.time ?: -1L).toString(),
+            ),
         ).use { c ->
-            // amount đã lưu có thể gồm phí → so trên thông báo gốc
             while (c.moveToNext()) {
                 val d = Parser.parse(c.getString(1)) ?: continue
-                if (Parser.sameTx(d, p)) return c.getLong(0) to c.getString(1)
+                val old = Seen(c.getLong(0), c.getString(1), c.getLong(2), d)
+                if (sameTx(old, s)) return old
             }
         }
         return null
     }
 
-    /** MB gửi lại một giao dịch người dùng đã xoá → không thêm lại. */
-    private fun isDeleted(db: SQLiteDatabase, pkg: String, p: Parser.Parsed): Boolean {
-        if (p.time == null || p.balanceAfter == null) return false
-        db.rawQuery("SELECT text FROM queue WHERE package = ? AND status = '$DELETED'", arrayOf(pkg)).use { c ->
+    /**
+     * MB gửi lại / quét lại một giao dịch người dùng đã xoá → không thêm lại. Bản đã xoá là bản cụt
+     * (kém đầy đủ hơn) thì không chặn: người dùng xoá bản lỗi, bản đầy đủ vẫn phải vào.
+     */
+    private fun isDeleted(db: SQLiteDatabase, pkg: String, s: Seen): Boolean {
+        db.rawQuery("SELECT id, text, posted_at FROM queue WHERE package = ? AND status = '$DELETED'", arrayOf(pkg)).use { c ->
             while (c.moveToNext()) {
-                val d = Parser.parse(c.getString(0)) ?: continue
-                if (Parser.sameTx(d, p)) return true
+                val d = Parser.parse(c.getString(1)) ?: continue
+                val old = Seen(c.getLong(0), c.getString(1), c.getLong(2), d)
+                if (sameTx(old, s) && !richer(s, old)) return true
             }
         }
         return false
     }
 
-    /** Thay nội dung thông báo [queueId] bằng bản đầy đủ hơn; giữ queue_id nên giữ tag. */
-    private fun replaceText(db: SQLiteDatabase, queueId: Long, title: String?, body: String, p: Parser.Parsed): Boolean {
+    /** Thay nội dung giao dịch đã lưu [old] bằng bản đầy đủ hơn [new]; giữ queue_id nên giữ tag. */
+    private fun replaceText(db: SQLiteDatabase, old: Seen, title: String?, new: Seen): Boolean {
         val cv = ContentValues().apply {
-            put("text", body)
+            put("text", new.text)
             if (title != null) put("title", title.take(500))
         }
-        if (db.updateWithOnConflict("queue", cv, "id = ?", arrayOf(queueId.toString()), SQLiteDatabase.CONFLICT_IGNORE) <= 0) {
+        if (db.updateWithOnConflict("queue", cv, "id = ?", arrayOf(old.id.toString()), SQLiteDatabase.CONFLICT_IGNORE) <= 0) {
             return false
         }
-        val time = p.time ?: return true // findSame chỉ khớp bản có giờ
-        saveParsed(db, queueId, p, time)
-        resettle(db, p.account, time)
+        saveParsed(db, old.id, new.p, old.postedAt)
+        // Bản cũ có thể đã nằm trong chuỗi số dư ở thời điểm khác (giờ máy nhận) → đối soát lại cả 2 chỗ
+        if (old.p.balanceAfter != null) resettle(db, old.p.account, old.p.time ?: old.postedAt)
+        if (new.p.balanceAfter != null) resettle(db, new.p.account, new.p.time ?: old.postedAt)
         return true
     }
 
@@ -382,45 +409,52 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         ).use { c -> if (c.moveToFirst()) c.getString(0) to c.getLong(1) else null }
 
     /**
-     * Xoá thông báo trùng giao dịch đã có ([Parser.sameTx]), giữ bản lưu trước nhưng lấy nội dung dài hơn
-     * (bản trước có thể bị cắt); tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag.
+     * Xoá thông báo trùng giao dịch đã có ([sameTx], kể cả bản bị cắt), giữ dòng lưu trước (giữ tag) nhưng lấy
+     * nội dung đầy đủ hơn; tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag.
      * Giao dịch đã xoá không tính: người dùng có thể đã tự xoá bản trùng, bản còn lại là giao dịch thật.
      * Trả về số bản đã xoá.
      */
     private fun dropDuplicates(db: SQLiteDatabase): Int {
-        data class Row(val id: Long, val pkg: String, val text: String, val p: Parser.Parsed)
+        data class Row(val pkg: String, val seen: Seen)
         val rows = ArrayList<Row>()
         db.rawQuery(
             """
-            SELECT q.id, q.package, q.text FROM transactions t JOIN queue q ON q.id = t.queue_id
-            WHERE t.time_from_text = 1 AND t.balance_after IS NOT NULL AND q.package != '$MANUAL' ORDER BY q.id
+            SELECT q.id, q.package, q.text, q.posted_at FROM transactions t JOIN queue q ON q.id = t.queue_id
+            WHERE q.package != '$MANUAL' ORDER BY q.posted_at, q.id
             """.trimIndent(),
             null,
         ).use { c ->
-            while (c.moveToNext()) Parser.parse(c.getString(2))?.let { rows.add(Row(c.getLong(0), c.getString(1), c.getString(2), it)) }
+            while (c.moveToNext()) {
+                val p = Parser.parse(c.getString(2)) ?: continue
+                rows.add(Row(c.getString(1), Seen(c.getLong(0), c.getString(2), c.getLong(3), p)))
+            }
         }
         var removed = 0
-        for (group in rows.groupBy { listOf(it.pkg, it.p.time, it.p.balanceAfter, it.p.account) }.values) {
-            val kept = ArrayList<Row>()
+        for (group in rows.groupBy { listOf(it.pkg, it.seen.p.amount, it.seen.p.isIn) }.values) {
+            // kept[i] = (dòng giữ lại, nội dung tốt nhất của nhóm trùng đó)
+            val kept = ArrayList<Pair<Seen, Seen>>()
             for (r in group) {
-                val i = kept.indexOfFirst { Parser.sameTx(it.p, r.p) }
+                val i = kept.indexOfFirst { (keep, best) -> sameTx(best, r.seen) || sameTx(keep, r.seen) }
                 if (i < 0) {
-                    kept.add(r)
+                    kept.add(r.seen to r.seen)
                     continue
                 }
-                val keep = kept[i]
-                val args = arrayOf(r.id.toString())
+                val (keep, best) = kept[i]
+                val args = arrayOf(r.seen.id.toString())
                 db.execSQL(
                     "INSERT OR IGNORE INTO tx_tags(queue_id, tag_id) SELECT ?, tag_id FROM tx_tags WHERE queue_id = ?",
-                    arrayOf<Any>(keep.id, r.id),
+                    arrayOf<Any>(keep.id, r.seen.id),
                 )
                 for (table in listOf("tx_tags", "confirmed_fees", "transactions")) db.delete(table, "queue_id = ?", args)
                 db.delete("queue", "id = ?", args)
                 removed++
-                if (r.text.length > keep.text.length) {
-                    db.execSQL("UPDATE OR IGNORE queue SET text = ? WHERE id = ?", arrayOf<Any>(r.text, keep.id))
-                    saveParsed(db, keep.id, r.p, r.p.time ?: 0L)
-                    kept[i] = keep.copy(text = r.text, p = r.p)
+                if (richer(r.seen, best)) kept[i] = keep to r.seen
+            }
+            for ((keep, best) in kept) {
+                if (best.id == keep.id) continue
+                val cv = ContentValues().apply { put("text", best.text) }
+                if (db.updateWithOnConflict("queue", cv, "id = ?", arrayOf(keep.id.toString()), SQLiteDatabase.CONFLICT_IGNORE) > 0) {
+                    saveParsed(db, keep.id, best.p, keep.postedAt)
                 }
             }
         }
@@ -797,6 +831,9 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
         /** queue.package của giao dịch nhập tay. */
         private const val MANUAL = "manual"
+
+        /** 2 thông báo cùng giao dịch (1 bản bị cắt) nhận cách nhau tối đa chừng này. */
+        private const val NEAR_MS = 10 * 60_000L
 
         private val DEFAULT_TAGS = listOf("Ăn uống", "Đi lại", "Mua sắm", "Hoá đơn", "Nhà cửa", "Lương", "Chuyển khoản", "Khác")
 

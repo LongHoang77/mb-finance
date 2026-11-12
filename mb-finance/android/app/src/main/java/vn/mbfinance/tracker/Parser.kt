@@ -11,7 +11,7 @@ import java.time.ZoneOffset
 object Parser {
 
     /** Tăng mỗi khi sửa regex hoặc cách đối soát trùng/phí để app tự phân tích lại dữ liệu cũ. */
-    const val VERSION = 3
+    const val VERSION = 4
 
     data class Parsed(
         val amount: Long, // VND, luôn dương
@@ -106,9 +106,27 @@ object Parser {
      */
     fun sameTx(a: Parsed, b: Parsed): Boolean =
         a.time != null && a.balanceAfter != null && a.time == b.time && a.balanceAfter == b.balanceAfter &&
-            a.amount == b.amount && a.isIn == b.isIn && a.account == b.account && sameDescription(a.description, b.description)
+            a.amount == b.amount && a.isIn == b.isIn && a.account == b.account && prefixMatch(a.description, b.description)
 
-    private fun sameDescription(a: String?, b: String?): Boolean {
+    /**
+     * Bản bị cắt của cùng 1 giao dịch (thiếu ND/SD/giờ/TK): cùng GD và chiều, trường cả 2 cùng có thì khớp,
+     * 1 bên thiếu trường bên kia có. Chưa đủ chắc nếu đứng riêng → Store kèm điều kiện thời gian gần nhau.
+     */
+    fun partialSame(a: Parsed, b: Parsed): Boolean {
+        if (a.amount != b.amount || a.isIn != b.isIn) return false
+        if (!agree(a.balanceAfter, b.balanceAfter) || !agree(a.time, b.time)) return false
+        if (!prefixMatch(a.account, b.account) || !prefixMatch(a.description, b.description)) return false
+        return fields(a) != fields(b)
+    }
+
+    /** Số trường đọc được (ND, SD, giờ, TK); bản nhiều hơn là bản đầy đủ hơn. */
+    fun completeness(p: Parsed) = fields(p).count { it }
+
+    private fun fields(p: Parsed) = listOf(p.description != null, p.balanceAfter != null, p.time != null, p.account != null)
+
+    private fun <T> agree(x: T?, y: T?) = x == null || y == null || x == y
+
+    private fun prefixMatch(a: String?, b: String?): Boolean {
         // Bỏ dấu "…"/"..." ở cuối bản bị cắt
         val x = a.orEmpty().trimEnd('…', '.', ' ')
         val y = b.orEmpty().trimEnd('…', '.', ' ')
