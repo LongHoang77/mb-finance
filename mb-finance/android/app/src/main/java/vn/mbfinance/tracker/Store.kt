@@ -254,14 +254,14 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     /** Giao dịch đã lưu (chưa xoá) trùng [s], null nếu không có. */
     private fun findSame(db: SQLiteDatabase, pkg: String, s: Seen): Seen? {
-        // Ứng viên: nhận gần nhau hoặc cùng giờ ghi trong text; amount đã lưu có thể gồm phí → so trên thông báo gốc
+        // Ứng viên: nhận gần nhau hoặc cùng giờ ghi trong text; amount/chiều đã lưu tính theo số dư → so trên thông báo gốc
         db.rawQuery(
             """
             SELECT q.id, q.text, q.posted_at FROM transactions t JOIN queue q ON q.id = t.queue_id
-            WHERE q.package = ? AND t.direction = ? AND (q.posted_at BETWEEN ? AND ? OR t.tx_time = ?)
+            WHERE q.package = ? AND (q.posted_at BETWEEN ? AND ? OR t.tx_time = ?)
             """.trimIndent(),
             arrayOf(
-                pkg, if (s.p.isIn) "in" else "out", (s.postedAt - NEAR_MS).toString(), (s.postedAt + NEAR_MS).toString(),
+                pkg, (s.postedAt - NEAR_MS).toString(), (s.postedAt + NEAR_MS).toString(),
                 (s.p.time ?: -1L).toString(),
             ),
         ).use { c ->
@@ -634,9 +634,11 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     }
 
     /**
-     * Đối soát chain[i] với số dư liền trước: amount = GD + phí (xác nhận tay hoặc [Parser.fee]),
-     * gap = phần lệch còn lại (> 0: số dư thấp hơn dự tính — phí không ghi / sót giao dịch ra; < 0: sót giao dịch vào).
-     * Mốc nhập tay chỉ ghi lệch của nó. Trả về phí.
+     * Đối soát chain[i] với số dư liền trước. Số tiền + chiều tính theo SỐ DƯ: amount = |số dư sau − số dư trước|
+     * (gồm luôn phí MB không ghi; số dư không đổi = 0, tức bản trùng), chỉ mắt xích đầu (chưa có số dư trước)
+     * mới dùng GD trong tin nhắn. fee = phần phí nhận ra được (xác nhận tay hoặc [Parser.fee]),
+     * gap = phần GD trong tin nhắn không khớp số dư (> 0: số dư thấp hơn — phí không ghi / sót giao dịch ra gộp vào đây;
+     * < 0: sót giao dịch vào), chỉ để cảnh báo. Mốc nhập tay chỉ ghi lệch của nó. Trả về phí.
      */
     private fun settle(db: SQLiteDatabase, chain: List<Link>, i: Int): Long {
         val l = chain[i]
@@ -649,9 +651,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val diff = prev?.let { (if (p.isIn) it + p.amount else it - p.amount) - l.balance }
         val fee = l.confirmed?.takeIf { !p.isIn && it == diff } ?: Parser.fee(p, prev)
         val gap = diff?.minus(fee)?.takeIf { it != 0L }
+        val delta = prev?.let { l.balance - it }
+        val amount = if (delta == null) p.amount + fee else Math.abs(delta)
+        val isIn = if (delta == null || delta == 0L) p.isIn else delta > 0
         db.execSQL(
-            "UPDATE transactions SET amount = ?, fee = ?, gap = ? WHERE queue_id = ?",
-            arrayOf<Any?>(p.amount + fee, fee, gap, l.id),
+            "UPDATE transactions SET amount = ?, direction = ?, fee = ?, gap = ? WHERE queue_id = ?",
+            arrayOf<Any?>(amount, if (isIn) "in" else "out", fee, gap, l.id),
         )
         return fee
     }

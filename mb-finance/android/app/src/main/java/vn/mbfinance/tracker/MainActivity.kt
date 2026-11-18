@@ -637,11 +637,13 @@ class MainActivity : Activity() {
         else -> ui.iconCircle(R.drawable.ic_arrow_up, ui.muted, size)
     }
 
-    /** "Có thể trùng" (số dư không đổi so với mắt xích trước) / "Lệch số dư"; null nếu không lệch. */
+    /**
+     * "Có thể trùng" (số dư không đổi so với mắt xích trước → số tiền theo số dư = 0) / "Lệch số dư"
+     * (GD trong tin nhắn khác biến động số dư); null nếu khớp.
+     */
     private fun gapLabel(t: Tx): String? {
-        val gap = t.gap ?: return null
-        val gd = t.amount - t.fee
-        return if (gap == (if (t.isIn) gd else -gd)) "Có thể trùng" else "Lệch số dư"
+        if (t.gap == null) return null
+        return if (t.amount == 0L) "Có thể trùng" else "Lệch số dư"
     }
 
     private fun txRow(t: Tx, fmt: DateTimeFormatter): View {
@@ -807,11 +809,13 @@ class MainActivity : Activity() {
 
         val raw = if (t.manual) null else store.text(t.id)
         val fee = t.fee.takeIf { it > 0 }
+        // Số tiền hiển thị tính theo biến động số dư; GD trong tin nhắn chỉ để đối chiếu khi khác
+        val msg = raw?.let { Parser.parse(it) }?.takeIf { it.amount != t.amount || it.isIn != t.isIn }
         val info = listOfNotNull(
-            fee?.let { "Số tiền GD" to ui.money(t.amount - it) },
+            msg?.let { "Tin nhắn MB ghi" to ui.money(if (it.isIn) it.amount else -it.amount, signed = true) },
             fee?.let { (if (t.feeConfirmed) "Phí (bạn đã ghi nhận)" else "Phí/VAT (khớp số dư)") to ui.money(it) },
             t.balanceAfter?.let { "Số dư sau giao dịch" to ui.money(it) },
-            t.gap?.let { "Lệch số dư" to (if (it > 0) "thiếu " else "thừa ") + ui.money(kotlin.math.abs(it)) },
+            t.gap?.let { "Chênh so với tin nhắn" to (if (it > 0) "số dư thấp hơn " else "số dư cao hơn ") + ui.money(kotlin.math.abs(it)) },
             t.account?.let { "Tài khoản" to it },
         )
         if (info.isNotEmpty()) {
@@ -830,22 +834,20 @@ class MainActivity : Activity() {
         }
 
         t.gap?.let { gap ->
-            val gd = t.amount - t.fee
-            // Số dư không đổi so với mắt xích trước → lệch đúng bằng GD
-            val sameBalance = gap == (if (t.isIn) gd else -gd)
             ui.add(box, ui.callout(
                 R.drawable.ic_warning,
                 when {
-                    sameBalance -> "Số dư không đổi so với giao dịch liền trước — nhiều khả năng đây là bản trùng. " +
-                        "Xem thông báo gốc, đúng thì xoá giao dịch này."
-                    gap > 0 -> "Số dư sau giao dịch thấp hơn mức tính từ giao dịch liền trước. " +
-                        "Có thể sót một giao dịch tiền ra, hoặc bị trừ phí không ghi trong thông báo."
-                    else -> "Số dư sau giao dịch cao hơn mức tính từ giao dịch liền trước — có thể sót một giao dịch tiền vào."
+                    t.amount == 0L -> "Số dư không đổi so với giao dịch liền trước nên giao dịch này tính 0đ — nhiều khả năng " +
+                        "MB gửi trùng. Xem thông báo gốc, đúng thì xoá giao dịch này."
+                    gap > 0 -> "Số tiền đã tính theo số dư: cao hơn số MB ghi ${ui.money(gap)}. Phần chênh có thể là phí MB không ghi, " +
+                        "hoặc 1 giao dịch tiền ra bị sót được gộp vào đây. Ghi chú lại nếu cần."
+                    else -> "Số tiền đã tính theo số dư: số dư cao hơn mức tin nhắn ${ui.money(-gap)} — có thể 1 giao dịch tiền vào " +
+                        "bị sót được gộp vào đây. Ghi chú lại nếu cần."
                 },
                 ui.warn,
             ), 10)
             if (gap > 0 && !t.isIn) {
-                ui.add(box, ui.button("Ghi nhận ${ui.money(gap)} là phí", filled = false, icon = R.drawable.ic_check_circle) {
+                ui.add(box, ui.button("Đúng, ${ui.money(gap)} là phí", filled = false, icon = R.drawable.ic_check_circle) {
                     store.confirmFee(t.id, true)
                     changed = true
                     dialog.dismiss()

@@ -11,7 +11,7 @@ import java.time.ZoneOffset
 object Parser {
 
     /** Tăng mỗi khi sửa regex hoặc cách đối soát trùng/phí để app tự phân tích lại dữ liệu cũ. */
-    const val VERSION = 5
+    const val VERSION = 6 // 6: số tiền tính theo số dư (Store.settle)
 
     data class Parsed(
         val amount: Long, // VND, luôn dương
