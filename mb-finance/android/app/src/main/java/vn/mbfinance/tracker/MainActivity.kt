@@ -41,6 +41,7 @@ import vn.mbfinance.tracker.game.GameJob
 import vn.mbfinance.tracker.game.GameScreen
 import vn.mbfinance.tracker.game.GameSync
 import vn.mbfinance.tracker.game.Hoyolab
+import vn.mbfinance.tracker.update.Updater
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.LocalDate
@@ -83,6 +84,10 @@ class MainActivity : Activity() {
     private lateinit var batteryButton: View
     private lateinit var pkgText: TextView
     private lateinit var logText: TextView
+    private lateinit var dupText: TextView
+    private lateinit var updateText: TextView
+    private lateinit var updateButton: TextView
+    private lateinit var tokenButton: TextView
     private lateinit var scanText: TextView
     private lateinit var tagsBox: LinearLayout
     private lateinit var marksBox: LinearLayout
@@ -192,6 +197,8 @@ class MainActivity : Activity() {
         handler.post(ticker)
         // Mở app = quét bù thông báo bị lỡ khi listener bị hệ thống ngắt
         thread { runCatching { MbNotificationListener.catchUp(applicationContext) } }
+        if (Updater.shouldAutoCheck(this)) checkUpdate(manual = false)
+        renderUpdate() // lỗi cài đặt (UpdateReceiver) ghi khi app ở nền
         // Mở app cũng là dịp tự điểm danh bù (ROM hay giết tác vụ nền)
         if (module == MODULE_GAME) {
             game.onShow()
@@ -659,10 +666,17 @@ class MainActivity : Activity() {
             meta.append(" · ").append(it)
             meta.setSpan(ForegroundColorSpan(ui.warn), start, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
+        if (t.dups > 0) meta.append(" · gộp ${t.dups} TB trùng")
         ui.add(body, ui.text(meta, 12f, ui.muted).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }, 4)
+        t.note?.let {
+            ui.add(body, ui.text(ui.iconText(R.drawable.ic_note, it, ui.primary, 14), 12f, ui.fg).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, 3)
+        }
         val amount = ui.amount(if (t.isIn) t.amount else -t.amount, 15f, if (t.isIn) ui.green else ui.fg, signed = true)
         return ui.listRow(txAvatar(t), body, amount).apply {
             setPadding(0, dp(12), 0, dp(12))
@@ -846,6 +860,38 @@ class MainActivity : Activity() {
             }, 8)
         }
 
+        // Ghi chú: vd MB không ghi phí VAT, giải thích khoản lệch
+        ui.add(box, ui.text("Ghi chú", 14f, bold = true), 22)
+        t.note?.let {
+            ui.add(box, ui.text(it, 14f).apply {
+                setTextIsSelectable(true)
+                background = ui.rounded(ui.surface2, 12)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+            }, 8)
+        }
+        ui.add(box, ui.button(if (t.note == null) "Thêm ghi chú" else "Sửa ghi chú", filled = false, icon = R.drawable.ic_note) {
+            askNote(t) {
+                changed = true
+                dialog.dismiss()
+            }
+        }, 8)
+
+        // Thông báo MB bị coi là trùng và gộp vào giao dịch này: xem, tách ra nếu thật ra là giao dịch khác
+        if (t.dups > 0) {
+            ui.add(box, ui.text("Thông báo trùng đã gộp (${t.dups})", 14f, bold = true), 22)
+            ui.add(box, ui.text(
+                "Các thông báo này được coi là MB gửi lại cùng giao dịch nên không tính thêm. " +
+                    "Nếu thật ra là giao dịch khác (vd 2 lần chuyển cùng số tiền), bấm Tách riêng.",
+                12f, ui.muted,
+            ), 4)
+            for (d in store.duplicates(t.id)) {
+                ui.add(box, dupCard(d) {
+                    changed = true
+                    dialog.dismiss()
+                }, 8)
+            }
+        }
+
         if (raw != null) {
             val rawText = ui.text(raw, 13f).apply {
                 setTextIsSelectable(true)
@@ -889,6 +935,95 @@ class MainActivity : Activity() {
                 .show()
         }, 8)
 
+        dialog.setOnDismissListener { if (changed) reload() }
+        showSheet(dialog, box)
+    }
+
+    /** Sửa ghi chú của [t] (để trống = xoá); gợi ý sẵn khi số dư lệch như bị trừ phí MB không ghi. */
+    private fun askNote(t: Tx, onSaved: () -> Unit) {
+        val input = ui.input("Vd: MB không ghi phí VAT 1.100đ").apply {
+            setSingleLine(false)
+            minLines = 3
+            maxLines = 6
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(Store.NOTE_MAX))
+            setText(t.note.orEmpty())
+            setSelection(text.length)
+        }
+        val wrap = ui.vbox().apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(input)
+        }
+        val gap = t.gap
+        if (gap != null && gap > 0 && !t.isIn) {
+            ui.add(wrap, ui.chip("MB không ghi phí/VAT ${ui.money(gap)}", false) {
+                input.setText("MB không ghi phí/VAT ${ui.money(gap)}")
+                input.setSelection(input.text.length)
+            }, 8)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Ghi chú giao dịch")
+            .setView(wrap)
+            .setPositiveButton("Lưu") { _, _ ->
+                store.setNote(t.id, input.text.toString())
+                onSaved()
+            }
+            .setNegativeButton("Huỷ", null)
+            .apply { if (t.note != null) setNeutralButton("Xoá") { _, _ -> store.setNote(t.id, ""); onSaved() } }
+            .show()
+    }
+
+    /** Thẻ 1 thông báo đã gộp vì trùng: giờ nhận, nội dung, nút tách thành giao dịch riêng (hỏi lại). */
+    private fun dupCard(d: Store.Item, onSplit: () -> Unit): LinearLayout {
+        val c = ui.card(radius = 14, color = ui.surface2).apply { setPadding(dp(12), dp(10), dp(12), dp(10)) }
+        c.addView(ui.split(ui.text("Nhận lúc ${fmt(d.postedAt)}", 12f, ui.muted), ui.pill("Đã gộp", ui.warn)))
+        ui.add(c, ui.text(d.text, 13f).apply { setTextIsSelectable(true) }, 6)
+        ui.add(c, ui.button("Không phải trùng — tách riêng", filled = false, icon = R.drawable.ic_add) {
+            AlertDialog.Builder(this)
+                .setTitle("Tách thành giao dịch riêng?")
+                .setMessage("Thông báo này sẽ thành 1 giao dịch riêng, tính vào thống kê. \"Kiểm tra lại dữ liệu\" sẽ không gộp lại.")
+                .setPositiveButton("Tách riêng") { _, _ ->
+                    if (store.splitDuplicate(d.id)) onSplit() else toast("Không tách được thông báo này")
+                }
+                .setNegativeButton("Huỷ", null)
+                .show()
+        }, 8)
+        return c
+    }
+
+    /** Mọi thông báo đã gộp vì trùng (mới nhất trước), chạm "Xem giao dịch" để mở giao dịch được giữ lại. */
+    private fun showDuplicates() {
+        val dialog = Dialog(this)
+        val box = sheetBox()
+        ui.add(box, ui.text("Thông báo trùng đã gộp", 18f, bold = true), 16)
+        ui.add(box, ui.text(
+            "MB hay gửi lại cùng 1 giao dịch (hoặc bản bị cắt nội dung) — app gộp vào giao dịch đã có thay vì bỏ đi. " +
+                "Nếu thật ra là giao dịch khác, bấm Tách riêng.",
+            12f, ui.muted,
+        ), 6)
+        val list = store.duplicates()
+        if (list.isEmpty()) ui.add(box, empty(R.drawable.ic_check_circle, "Chưa có thông báo nào bị gộp."), 16)
+        var changed = false
+        for (d in list.take(100)) {
+            val card = dupCard(d) {
+                changed = true
+                dialog.dismiss()
+            }
+            ledger.txs.firstOrNull { it.id == d.dupOf }?.let { kept ->
+                ui.add(card, ui.text(ui.iconText(R.drawable.ic_chevron_right, "Gộp vào: ${descText(kept)} · ${ui.money(kept.amount)}", ui.primary, 14), 13f, ui.primary).apply {
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(0, dp(8), 0, dp(4))
+                    setOnClickListener {
+                        dialog.dismiss()
+                        showTx(kept)
+                    }
+                }, 2)
+            }
+            ui.add(box, card, 10)
+        }
+        ui.add(box, ui.button("Đóng") { dialog.dismiss() }, 18)
         dialog.setOnDismissListener { if (changed) reload() }
         showSheet(dialog, box)
     }
@@ -1595,6 +1730,24 @@ class MainActivity : Activity() {
         })
         logText = ui.text("", 12f, ui.muted)
         notif.addView(navRow(R.drawable.ic_list, "Nhật ký thông báo", logText) { showNotifLog() })
+        notif.addView(ui.divider(), LinearLayout.LayoutParams(MATCH, 1).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(4)
+            marginStart = dp(52)
+        })
+        dupText = ui.text("", 12f, ui.muted)
+        notif.addView(navRow(R.drawable.ic_sync, "Thông báo trùng đã gộp", dupText) { showDuplicates() })
+
+        val upd = section("Cập nhật app", R.drawable.ic_download)
+        updateText = ui.text("", 14f).also { upd.addView(it) }
+        updateButton = ui.button("Kiểm tra cập nhật", icon = R.drawable.ic_sync) { onUpdateButton() }.also { ui.add(upd, it, 12) }
+        tokenButton = ui.button("", filled = false, icon = R.drawable.ic_shield) { askToken() }.also { ui.add(upd, it, 8) }
+        ui.add(upd, ui.text(
+            "Mỗi lần push code, GitHub Actions build APK và đăng bản phát hành. App tự kiểm tra khi mở (tối đa 3 giờ/lần), " +
+                "tải về và cài đè — dữ liệu giữ nguyên. Repo riêng tư thì cần nhập token chỉ đọc.",
+            12f, ui.muted,
+        ), 10)
+        renderUpdate()
 
         val markSec = section("Số dư thực tế", R.drawable.ic_wallet)
         markSec.addView(ui.text(
@@ -1611,7 +1764,7 @@ class MainActivity : Activity() {
         ui.add(scan, ui.button("Quét lại thông báo đang hiện", icon = R.drawable.ic_sync) { scanNotifications() }, 12)
         ui.add(scan, ui.button("Kiểm tra lại dữ liệu đã lưu", filled = false, icon = R.drawable.ic_shield) { recheckStored() }, 8)
         ui.add(scan, ui.text(
-            "Quét lại thanh thông báo, đọc lại mọi thông báo MB đã lưu, xoá giao dịch bị lưu trùng (kể cả bản bị cắt nội dung), " +
+            "Quét lại thanh thông báo, đọc lại mọi thông báo MB đã lưu, gộp giao dịch bị lưu trùng (kể cả bản bị cắt nội dung), " +
                 "tính lại phí/VAT theo số dư và đánh dấu giao dịch lệch số dư.",
             12f, ui.muted,
         ), 6)
@@ -1650,6 +1803,8 @@ class MainActivity : Activity() {
         headerStatus.setTextColor(if (ok) ui.muted else ui.warn)
 
         pkgText.text = "Đang theo dõi ${label(settings.mbPackage)} · ${settings.mbPackage}"
+        val dups = ledger.txs.sumOf { it.dups }
+        dupText.text = if (dups == 0) "Chưa có thông báo nào bị gộp" else "$dups thông báo · chạm để xem hoặc tách riêng"
         logText.text = store.recent(1).firstOrNull()?.let { "Mới nhất lúc ${fmt(it.postedAt)} · chạm để xem theo ngày" }
             ?: "Chưa có thông báo nào từ app đang theo dõi"
 
@@ -1933,7 +2088,7 @@ class MainActivity : Activity() {
 
         fun fillList() {
             val items = store.notifications(start(day), start(day.plusDays(1)))
-            val parsed = items.count { !it.deleted && Parser.parse(it.text) != null }
+            val parsed = items.count { !it.deleted && it.dupOf == null && Parser.parse(it.text) != null }
             val dayLabel = dayFmt.format(day).replaceFirstChar { it.uppercase() }
             summary.text = if (items.isEmpty()) dayLabel else "$dayLabel · ${items.size} thông báo · $parsed giao dịch"
             list.removeAllViews()
@@ -1943,6 +2098,7 @@ class MainActivity : Activity() {
             items.forEachIndexed { i, item ->
                 val (state, color) = when {
                     item.deleted -> "Đã xoá" to ui.muted
+                    item.dupOf != null -> "Trùng · đã gộp" to ui.warn
                     Parser.parse(item.text) != null -> "Giao dịch" to ui.green
                     Parser.looksLikeTransaction(item.text) -> "Chưa đọc được" to ui.warn
                     else -> "Không phải giao dịch" to ui.muted
@@ -1950,6 +2106,15 @@ class MainActivity : Activity() {
                 val c = ui.card(radius = 16).apply { setPadding(dp(14), dp(12), dp(14), dp(12)) }
                 c.addView(ui.split(ui.text(clockFmt.format(Instant.ofEpochMilli(item.postedAt)), 12f, ui.muted), ui.pill(state, color)))
                 ui.add(c, ui.text(item.text, 13f).apply { setTextIsSelectable(true) }, 8)
+                if (item.dupOf != null) {
+                    ui.add(c, ui.text("Xem / tách riêng", 13f, ui.primary, bold = true).apply {
+                        setPadding(0, dp(4), 0, dp(2))
+                        setOnClickListener {
+                            dialog.dismiss()
+                            showDuplicates()
+                        }
+                    }, 6)
+                }
                 ui.add(list, c, if (i > 0) 8 else 4)
             }
             scroll.scrollTo(0, 0)
@@ -1989,7 +2154,7 @@ class MainActivity : Activity() {
                 val msg = if (r == null) "Kiểm tra lại thất bại" else buildString {
                     append("Đã kiểm tra lại")
                     if (scanned > 0) append(", lưu thêm $scanned thông báo")
-                    append(if (r.duplicates > 0) ", xoá ${r.duplicates} bản trùng" else ", không có bản trùng")
+                    append(if (r.duplicates > 0) ", gộp ${r.duplicates} bản trùng" else ", không có bản trùng")
                     if (r.withFee > 0) append(", ${r.withFee} giao dịch có phí/VAT")
                     if (r.gaps > 0) append(", ${r.gaps} giao dịch lệch số dư")
                 }
@@ -2061,6 +2226,132 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             startActivity(Intent(AndroidSettings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
+    }
+
+    // ------------------------------------------------------------------ cập nhật app
+
+    /** Đang tải/cài bản cập nhật (chặn bấm lại). */
+    private var updating = false
+
+    private fun renderUpdate() {
+        if (updating) return
+        val cur = Updater.currentName(this)
+        val r = Updater.available
+        val err = Updater.lastError(this)
+        val hasToken = Updater.hasToken(this)
+        updateText.text = when {
+            r != null -> SpannableStringBuilder(ui.iconText(R.drawable.ic_download, "Có bản mới ${r.name} (đang dùng $cur)", ui.primary, 18)).apply {
+                if (r.notes.isNotEmpty()) append("\n").append(r.notes.take(300))
+            }
+            err != null -> ui.iconText(R.drawable.ic_warning, "Bản $cur · $err", ui.warn, 18)
+            Updater.lastCheck(this) > 0 -> ui.iconText(
+                R.drawable.ic_check_circle, "Bản $cur · đã là bản mới nhất (kiểm tra lúc ${fmt(Updater.lastCheck(this))})", ui.green, 18,
+            )
+            else -> ui.iconText(R.drawable.ic_info, "Bản $cur", ui.muted, 18)
+        }
+        updateButton.text = if (r != null) ui.iconText(R.drawable.ic_download, "Tải và cài bản ${r.name}", ui.onPrimary, 18)
+        else ui.iconText(R.drawable.ic_sync, "Kiểm tra cập nhật", ui.onPrimary, 18)
+        tokenButton.text = ui.iconText(R.drawable.ic_shield, if (hasToken) "Đổi / xoá GitHub token" else "GitHub token (chỉ khi repo riêng tư)", ui.primary, 18)
+    }
+
+    private fun onUpdateButton() {
+        if (updating) return
+        val r = Updater.available
+        if (r == null) checkUpdate(manual = true) else startUpdate(r)
+    }
+
+    /** Kiểm tra bản mới ở luồng nền; tự kiểm tra ([manual] false) chỉ hỏi cập nhật 1 lần cho mỗi bản. */
+    private fun checkUpdate(manual: Boolean) {
+        val app = applicationContext
+        if (manual) updateText.text = "Đang kiểm tra…"
+        thread {
+            val res = runCatching { Updater.check(app) }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                renderUpdate()
+                val r = res.getOrNull()
+                when {
+                    res.isFailure -> if (manual) toast(Updater.lastError(this) ?: "Kiểm tra cập nhật thất bại")
+                    r == null -> if (manual) toast("Đang dùng bản mới nhất")
+                    manual || r.code != Updater.seenCode(this) -> {
+                        Updater.markSeen(this, r.code)
+                        AlertDialog.Builder(this)
+                            .setTitle("Có bản cập nhật ${r.name}")
+                            .setMessage(r.notes.ifEmpty { "Bản mới đã được build từ code mới nhất." }.take(600) + "\n\nDữ liệu trên máy giữ nguyên.")
+                            .setPositiveButton("Cập nhật") { _, _ -> startUpdate(r) }
+                            .setNegativeButton("Để sau", null)
+                            .show()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Tải APK rồi cài đè; lần đầu cần cho phép app "cài ứng dụng không rõ nguồn gốc". */
+    private fun startUpdate(r: Updater.Release) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle("Cho phép tự cài bản cập nhật")
+                .setMessage("Bật \"Cho phép từ nguồn này\" cho Thu chi MB, quay lại app rồi bấm cập nhật lần nữa.")
+                .setPositiveButton("Mở cài đặt") { _, _ ->
+                    startActivity(Intent(AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                }
+                .setNegativeButton("Huỷ", null)
+                .show()
+            return
+        }
+        updating = true
+        updateText.text = "Đang tải bản ${r.name}…"
+        val app = applicationContext
+        thread {
+            val res = runCatching {
+                val apk = Updater.download(app, r) { pct -> runOnUiThread { updateText.text = "Đang tải bản ${r.name}… $pct%" } }
+                runOnUiThread { updateText.text = "Đang cài bản ${r.name}…" }
+                Updater.install(app, apk)
+            }
+            runOnUiThread {
+                updating = false
+                res.exceptionOrNull()?.let {
+                    val msg = if (it is Exception) Updater.describe(it) else it.toString()
+                    Updater.setError(app, msg)
+                    toast(msg)
+                }
+                if (!isDestroyed) renderUpdate()
+            }
+        }
+    }
+
+    /** Nhập token GitHub chỉ đọc (fine-grained, chỉ repo mb-finance, Contents: Read-only). */
+    private fun askToken() {
+        val input = ui.input("github_pat_…").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val wrap = ui.vbox().apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(ui.text(
+                "Chỉ cần khi repo để riêng tư. GitHub → Settings → Developer settings → Fine-grained tokens → Generate: " +
+                    "chỉ chọn repo mb-finance, quyền Contents = Read-only. Token chỉ lưu trên máy (mã hoá) và chỉ gửi tới api.github.com.",
+                13f, ui.muted,
+            ))
+            ui.add(this, input, 10)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("GitHub token")
+            .setView(wrap)
+            .setPositiveButton("Lưu") { _, _ ->
+                val t = input.text.toString().trim()
+                if (t.isEmpty()) return@setPositiveButton
+                Updater.setToken(this, t)
+                checkUpdate(manual = true)
+            }
+            .setNegativeButton("Huỷ", null)
+            .apply {
+                if (Updater.hasToken(this@MainActivity)) setNeutralButton("Xoá token") { _, _ ->
+                    Updater.setToken(this@MainActivity, null)
+                    renderUpdate()
+                }
+            }
+            .show()
     }
 
     // ------------------------------------------------------------------ tiện ích

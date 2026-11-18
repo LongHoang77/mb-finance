@@ -7,6 +7,10 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
 
+# Đăng bản phát hành (GitHub Releases) để app tự cập nhật
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,6 +27,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # versionCode luôn tăng theo số lần chạy → app so với bản đang cài để biết có bản mới
+      - name: Version
+        run: |
+          echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=1.5.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build APK
         run: |
           chmod +x gradlew
@@ -34,3 +44,17 @@ jobs:
           name: thu-chi-mb-apk
           path: mb-finance/android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
+
+      # Chỉ nhánh main mới thành bản cập nhật cho app; giữ 5 bản gần nhất
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk thu-chi-mb.apk
+          git log -1 --pretty=%B > notes.txt
+          tag="build-$VERSION_CODE"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" thu-chi-mb.apk --title "$VERSION_NAME" --notes-file notes.txt --target "$GITHUB_SHA" --latest
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^build-' | sort -t- -k2 -n -r | tail -n +6 \
+            | xargs -r -I{} gh release delete {} --yes --cleanup-tag

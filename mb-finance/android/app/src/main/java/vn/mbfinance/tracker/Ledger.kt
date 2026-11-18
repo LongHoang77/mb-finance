@@ -23,6 +23,8 @@ data class Tx(
     val feeConfirmed: Boolean = false, // người dùng đã xác nhận khoản lệch là phí
     val fee: Long = 0, // phần phí/VAT đã cộng vào amount
     val plan: Plan? = null, // khoản cọc/trả dần hoặc mục tiêu tiết kiệm đang gắn
+    val note: String? = null, // ghi chú người dùng (vd MB không ghi phí VAT)
+    val dups: Int = 0, // số thông báo đã gộp vào giao dịch này vì trùng (Store.duplicates)
 ) {
     /** Tiền ra chuyển tiết kiệm: không phải chi tiêu, tách khỏi thống kê thu/chi. */
     val saving get() = !isIn && plan?.saving == true

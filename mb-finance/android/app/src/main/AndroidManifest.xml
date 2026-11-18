@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Giữ lịch tự điểm danh (GameJob) sau khi khởi động lại máy -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Tự cập nhật: cài đè APK tải từ GitHub Releases (update/Updater.kt) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Để hiện tên app (vd "MB Bank") trong danh sách nguồn thông báo -->
     <queries>
@@ -56,6 +58,10 @@
 
         <receiver
             android:name=".game.GameAlarm"
+            android:exported="false" />
+
+        <receiver
+            android:name=".update.UpdateReceiver"
             android:exported="false" />
 
         <receiver

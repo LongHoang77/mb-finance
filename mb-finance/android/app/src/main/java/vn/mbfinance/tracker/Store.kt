@@ -16,7 +16,7 @@ import java.util.UUID
  * Thông báo giao dịch giữ mãi (bảng transactions và thống kê dựa trên đó);
  * thông báo khác (OTP, quảng cáo…) tự xoá sau 7 ngày.
  */
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 7) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db", null, 8) {
 
     /** Tăng khi dữ liệu đổi mà số dòng queue không đổi (thay nội dung, tính lại) → [dataKey] đổi. */
     @Volatile
@@ -29,11 +29,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         val text: String,
         val postedAt: Long,
         val deleted: Boolean = false, // người dùng đã xoá giao dịch này (xem [deleteTransaction])
+        val dupOf: Long? = null, // bị gộp vì trùng giao dịch queue_id này (xem [splitDuplicate])
     )
 
     data class Source(val pkg: String, val count: Int, val lastSeen: Long)
 
-    /** Kết quả [reparseAll]: số bản trùng đã xoá, số giao dịch có cộng phí/VAT, số giao dịch lệch số dư. */
+    /** Kết quả [reparseAll]: số bản trùng đã gộp, số giao dịch có cộng phí/VAT, số giao dịch lệch số dư. */
     data class Recheck(val duplicates: Int, val withFee: Int, val gaps: Int)
 
     /**
@@ -82,6 +83,7 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         createBalanceCheck(db)
         createPlans(db)
         createPlanDismissed(db)
+        createNotes(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -98,6 +100,18 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                 db.execSQL("UPDATE tags SET color = ? WHERE color = ?", arrayOf<Any>(TAG_COLORS[i], old))
             }
         }
+        if (oldVersion < 8) createNotes(db)
+    }
+
+    /**
+     * v8: ghi chú của giao dịch (theo queue_id như tag); thông báo trùng không bỏ đi mà giữ lại (status 'dup',
+     * queue.dup_of = giao dịch được giữ) để người dùng xem / tách ra; not_dup = cặp người dùng xác nhận không trùng (a < b).
+     */
+    private fun createNotes(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE notes (queue_id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
+        db.execSQL("ALTER TABLE queue ADD COLUMN dup_of INTEGER")
+        db.execSQL("CREATE INDEX idx_queue_dup ON queue(dup_of)")
+        db.execSQL("CREATE TABLE not_dup (a INTEGER NOT NULL, b INTEGER NOT NULL, PRIMARY KEY (a, b))")
     }
 
     /** v7: gợi ý "trả nốt khoản cọc" người dùng đã bấm "Không phải" → không hỏi lại. */
@@ -172,7 +186,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
 
     /**
      * Lưu thông báo + giao dịch phân tích được. Trả về false nếu đã có: cùng app + nội dung + thời điểm,
-     * trùng một giao dịch đã lưu hoặc đã xoá (xem [sameTx]).
+     * trùng một giao dịch đã lưu hoặc đã xoá (xem [sameTx]). Thông báo trùng giao dịch đã lưu vẫn được ghi lại
+     * (status 'dup') để người dùng xem và tách ra nếu thật ra là giao dịch khác ([splitDuplicate]).
      * Bản trùng đầy đủ hơn bản đã lưu (bản trước bị cắt) → thay nội dung bản đã lưu, trả về true.
      */
     fun enqueue(pkg: String, title: String?, text: String, postedAt: Long): Boolean {
@@ -193,10 +208,15 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                 if (isDeleted(db, pkg, mine)) return false
                 val same = findSame(db, pkg, mine)
                 if (same != null) {
-                    if (!richer(mine, same) || !replaceText(db, same, title, mine)) return false
+                    val replaced = richer(mine, same) && replaceText(db, same, title, mine)
+                    cv.put("status", DUP)
+                    cv.put("dup_of", same.id)
+                    // Quét lại đúng thông báo đã lưu → trùng UNIQUE, không ghi thêm
+                    val kept = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+                    if (!replaced && kept == -1L) return false
                     db.setTransactionSuccessful()
                     revision++
-                    return true
+                    return replaced
                 }
             }
             val id = db.insertWithOnConflict("queue", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
@@ -295,8 +315,11 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.beginTransaction()
         try {
             val at = position(db, queueId)
-            db.execSQL("UPDATE queue SET status = '$DELETED' WHERE id = ?", args)
-            for (table in listOf("transactions", "tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed")) db.delete(table, "queue_id = ?", args)
+            // Bản trùng đã gộp vào nó cũng coi như xoá (không thì "kiểm tra lại" sẽ đưa chúng trở lại)
+            db.execSQL("UPDATE queue SET status = '$DELETED' WHERE id = ? OR (dup_of = ? AND status = '$DUP')", arrayOf<Any>(queueId, queueId))
+            for (table in listOf("transactions", "tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed", "notes")) {
+                db.delete(table, "queue_id = ?", args)
+            }
             // Giao dịch sau nó đổi số dư liền trước → đối soát lại
             if (at != null) resettle(db, at.first, at.second)
             db.setTransactionSuccessful()
@@ -434,10 +457,11 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         ).use { c -> if (c.moveToFirst()) c.getString(0) to c.getLong(1) else null }
 
     /**
-     * Xoá thông báo trùng giao dịch đã có ([sameTx], kể cả bản bị cắt), giữ dòng lưu trước (giữ tag) nhưng lấy
-     * nội dung đầy đủ hơn; tag của bản bị xoá chuyển sang bản giữ lại nếu bản đó chưa có tag.
+     * Gộp thông báo trùng giao dịch đã có ([sameTx], kể cả bản bị cắt): giữ dòng lưu trước (giữ tag) nhưng lấy
+     * nội dung đầy đủ hơn; tag/khoản/ghi chú của bản bị gộp chuyển sang bản giữ lại nếu bản đó chưa có.
+     * Bản bị gộp thành 'dup' (dup_of = bản giữ lại), không xoá; cặp người dùng đã tách (bảng not_dup) không gộp.
      * Giao dịch đã xoá không tính: người dùng có thể đã tự xoá bản trùng, bản còn lại là giao dịch thật.
-     * Trả về số bản đã xoá.
+     * Trả về số bản đã gộp.
      */
     private fun dropDuplicates(db: SQLiteDatabase): Int {
         data class Row(val pkg: String, val seen: Seen)
@@ -454,12 +478,16 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                 rows.add(Row(c.getString(1), Seen(c.getLong(0), c.getString(2), c.getLong(3), p)))
             }
         }
+        val apart = apart(db)
+        fun differ(a: Seen, b: Seen) = (minOf(a.id, b.id) to maxOf(a.id, b.id)) in apart
         var removed = 0
         for (group in rows.groupBy { listOf(it.pkg, it.seen.p.amount, it.seen.p.isIn) }.values) {
             // kept[i] = (dòng giữ lại, nội dung tốt nhất của nhóm trùng đó)
             val kept = ArrayList<Pair<Seen, Seen>>()
             for (r in group) {
-                val i = kept.indexOfFirst { (keep, best) -> sameTx(best, r.seen) || sameTx(keep, r.seen) }
+                val i = kept.indexOfFirst { (keep, best) ->
+                    !differ(keep, r.seen) && !differ(best, r.seen) && (sameTx(best, r.seen) || sameTx(keep, r.seen))
+                }
                 if (i < 0) {
                     kept.add(r.seen to r.seen)
                     continue
@@ -474,8 +502,14 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                     "INSERT OR IGNORE INTO plan_tx(queue_id, plan_id) SELECT ?, plan_id FROM plan_tx WHERE queue_id = ?",
                     arrayOf<Any>(keep.id, r.seen.id),
                 )
-                for (table in listOf("tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed", "transactions")) db.delete(table, "queue_id = ?", args)
-                db.delete("queue", "id = ?", args)
+                db.execSQL(
+                    "INSERT OR IGNORE INTO notes(queue_id, text) SELECT ?, text FROM notes WHERE queue_id = ?",
+                    arrayOf<Any>(keep.id, r.seen.id),
+                )
+                for (table in listOf("tx_tags", "confirmed_fees", "plan_tx", "plan_dismissed", "notes", "transactions")) {
+                    db.delete(table, "queue_id = ?", args)
+                }
+                db.execSQL("UPDATE queue SET status = '$DUP', dup_of = ? WHERE id = ?", arrayOf<Any>(keep.id, r.seen.id))
                 removed++
                 if (richer(r.seen, best)) kept[i] = keep to r.seen
             }
@@ -525,12 +559,18 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
         db.beginTransaction()
         try {
             db.delete("transactions", "queue_id NOT IN (SELECT id FROM queue WHERE package = '$MANUAL')", null)
+            // Bản trùng được xét lại từ đầu (parser có thể đã đổi); dropDuplicates đánh dấu lại
+            val dupIds = { db.rawQuery("SELECT id FROM queue WHERE status = '$DUP'", null).use { c -> buildSet { while (c.moveToNext()) add(c.getLong(0)) } } }
+            val wasDup = dupIds()
+            db.execSQL("UPDATE queue SET status = 'pending', dup_of = NULL WHERE status = '$DUP'")
             db.rawQuery(
                 "SELECT id, text, posted_at FROM queue WHERE status != '$DELETED' AND package != '$MANUAL'", null
             ).use { c ->
                 while (c.moveToNext()) Parser.parse(c.getString(1))?.let { saveParsed(db, c.getLong(0), it, c.getLong(2)) }
             }
-            val removed = dropDuplicates(db)
+            dropDuplicates(db)
+            // Chỉ báo bản trùng mới gộp lần này
+            val removed = (dupIds() - wasDup).size
             val accounts = ArrayList<String>()
             db.rawQuery(
                 "SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL AND balance_after IS NOT NULL", null
@@ -665,13 +705,15 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
             SELECT t.queue_id, t.amount, t.direction, t.balance_after, t.account, t.description,
                    t.tx_time, t.tx_year, t.tx_month, t.tx_day, t.time_from_text, g.id, g.name, g.color,
                    q.package = '$MANUAL', t.gap, f.queue_id IS NOT NULL, t.fee,
-                   p.id, p.name, p.kind, p.target, p.done
+                   p.id, p.name, p.kind, p.target, p.done, n.text,
+                   (SELECT COUNT(*) FROM queue d WHERE d.dup_of = t.queue_id AND d.status = '$DUP')
             FROM transactions t JOIN queue q ON q.id = t.queue_id
             LEFT JOIN tx_tags tt ON tt.queue_id = t.queue_id
             LEFT JOIN tags g ON g.id = tt.tag_id
             LEFT JOIN confirmed_fees f ON f.queue_id = t.queue_id
             LEFT JOIN plan_tx pt ON pt.queue_id = t.queue_id
             LEFT JOIN plans p ON p.id = pt.plan_id
+            LEFT JOIN notes n ON n.queue_id = t.queue_id
             WHERE q.package IN (?, '$MANUAL')
             ORDER BY t.tx_time DESC, t.queue_id DESC
             """.trimIndent(),
@@ -695,6 +737,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         feeConfirmed = c.getInt(16) == 1,
                         fee = c.getLong(17),
                         plan = if (c.isNull(18)) null else plan(c, 18),
+                        note = if (c.isNull(23)) null else c.getString(23),
+                        dups = c.getInt(24),
                     )
                 )
             }
@@ -743,14 +787,14 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     /** Thông báo của [pkg] không phân tích được thành giao dịch, mới nhất trước. */
     fun unparsed(pkg: String): List<Item> =
         query(
-            "WHERE package = ? AND status != '$DELETED' AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC",
+            "WHERE package = ? AND status NOT IN ('$DELETED', '$DUP') AND id NOT IN (SELECT queue_id FROM transactions) ORDER BY posted_at DESC",
             arrayOf(pkg),
         )
 
     /** Xoá thông báo không phải giao dịch (OTP, quảng cáo…) cũ hơn [before]; giao dịch giữ mãi. */
     fun purgeNonTransactions(before: Long) {
         val ids = query(
-            "WHERE posted_at < ? AND id NOT IN (SELECT queue_id FROM transactions)", arrayOf(before.toString())
+            "WHERE posted_at < ? AND status != '$DUP' AND id NOT IN (SELECT queue_id FROM transactions)", arrayOf(before.toString())
         ).filter { !Parser.looksLikeTransaction(it.text) }.map { it.id }
         if (ids.isEmpty()) return
         val db = writableDatabase
@@ -788,7 +832,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     private fun query(tail: String, args: Array<String>? = null): List<Item> {
         val out = ArrayList<Item>()
         readableDatabase.rawQuery(
-            "SELECT id, package, title, text, posted_at, status = '$DELETED' FROM queue $tail", args
+            "SELECT id, package, title, text, posted_at, status = '$DELETED', CASE status WHEN '$DUP' THEN dup_of END FROM queue $tail",
+            args,
         ).use { c ->
             while (c.moveToNext()) {
                 out.add(
@@ -799,11 +844,62 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
                         text = c.getString(3),
                         postedAt = c.getLong(4),
                         deleted = c.getInt(5) == 1,
+                        dupOf = if (c.isNull(6)) null else c.getLong(6),
                     )
                 )
             }
         }
         return out
+    }
+
+    // ------------------------------------------------------------------ bản trùng + ghi chú
+
+    /** Cặp (a < b) người dùng đã xác nhận là 2 giao dịch khác nhau. */
+    private fun apart(db: SQLiteDatabase): Set<Pair<Long, Long>> {
+        val out = HashSet<Pair<Long, Long>>()
+        db.rawQuery("SELECT a, b FROM not_dup", null).use { c -> while (c.moveToNext()) out.add(c.getLong(0) to c.getLong(1)) }
+        return out
+    }
+
+    /** Thông báo đã gộp vào giao dịch [queueId] (coi là trùng), cũ nhất trước. */
+    fun duplicates(queueId: Long): List<Item> =
+        query("WHERE status = '$DUP' AND dup_of = ? ORDER BY posted_at, id", arrayOf(queueId.toString()))
+
+    /** Mọi thông báo đã gộp vì trùng, mới nhất trước. */
+    fun duplicates(): List<Item> = query("WHERE status = '$DUP' ORDER BY posted_at DESC, id DESC")
+
+    /**
+     * Người dùng xác nhận thông báo trùng [id] thật ra là giao dịch khác: thành giao dịch riêng, ghi nhớ cặp
+     * để "kiểm tra lại" không gộp lại. false nếu không còn là bản trùng / không đọc được.
+     */
+    fun splitDuplicate(id: Long): Boolean {
+        val item = query("WHERE id = ? AND status = '$DUP'", arrayOf(id.toString())).firstOrNull() ?: return false
+        val of = item.dupOf ?: return false
+        val p = Parser.parse(item.text) ?: return false
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE queue SET status = 'pending', dup_of = NULL WHERE id = ?", arrayOf<Any>(id))
+            db.execSQL("INSERT OR IGNORE INTO not_dup(a, b) VALUES (?, ?)", arrayOf<Any>(minOf(id, of), maxOf(id, of)))
+            saveParsed(db, id, p, item.postedAt)
+            if (p.balanceAfter != null) resettle(db, p.account, p.time ?: item.postedAt)
+            db.setTransactionSuccessful()
+            revision++
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Ghi chú của giao dịch [queueId] (vd "MB không ghi phí VAT 1.100đ"); rỗng = xoá ghi chú. */
+    fun setNote(queueId: Long, text: String) {
+        val t = text.trim().take(NOTE_MAX)
+        if (t.isEmpty()) {
+            writableDatabase.delete("notes", "queue_id = ?", arrayOf(queueId.toString()))
+        } else {
+            writableDatabase.execSQL("INSERT OR REPLACE INTO notes(queue_id, text) VALUES (?, ?)", arrayOf<Any>(queueId, t))
+        }
+        revision++
     }
 
     // ------------------------------------------------------------------ khoản lớn (cọc / tiết kiệm)
@@ -963,6 +1059,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "store.db"
     companion object {
         /** queue.status của thông báo có giao dịch người dùng đã xoá. */
         private const val DELETED = "deleted"
+
+        /** queue.status của thông báo trùng 1 giao dịch đã lưu (queue.dup_of), không thành giao dịch riêng. */
+        private const val DUP = "dup"
+
+        /** Độ dài tối đa của ghi chú giao dịch. */
+        const val NOTE_MAX = 500
 
         /** queue.package của giao dịch nhập tay. */
         private const val MANUAL = "manual"

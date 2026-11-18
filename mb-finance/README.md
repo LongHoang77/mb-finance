@@ -41,7 +41,8 @@ mb-finance/
 - Không mở cổng nào ra Internet (iptables chỉ mở cổng 22), không đổi `127.0.0.1:8080` trong `docker-compose.yml`.
 - Không ghi token hay nội dung thông báo (`raw_text`) vào log.
 - Không sửa code trực tiếp trên server. Mọi thay đổi đi qua GitHub rồi deploy bằng `ship.sh`.
-- Giữ repo GitHub ở chế độ **Private** (có khoá ký APK trong repo).
+- Khoá ký APK (`android/app/debug.keystore`) nằm trong repo. Repo để **Public** thì ai cũng ký được APK cài đè lên app
+  (đọc được dữ liệu tài chính trên máy) → chỉ cài APK từ Releases / Actions của chính repo này.
 
 ## Phát triển trên máy tính
 
@@ -229,6 +230,15 @@ Thông báo không khớp không bao giờ bị đoán bừa — chúng được
 
 Build tự động bằng GitHub Actions (`.github/workflows/android.yml`) mỗi khi thư mục `android/` thay đổi.
 APK nằm ở tab **Actions** → lần chạy mới nhất → mục **Artifacts** → `thu-chi-mb-apk`.
+
+**Tự cập nhật (không cần tải APK tay):** push lên `main` → CI build và đăng bản phát hành `build-<versionCode>`
+(GitHub Releases, giữ 5 bản gần nhất). Mỗi lần mở app (tối đa 3 giờ/lần) app tự kiểm tra, hỏi "Cập nhật", tải và
+cài đè (dữ liệu giữ nguyên). Xem / kiểm tra tay ở Cài đặt → **Cập nhật app**.
+- Repo công khai: không cần token. Nếu đổi repo về riêng tư: nhập token ở mục đó — GitHub → Settings → Developer
+  settings → **Fine-grained tokens** → chỉ repo `mb-finance`, quyền **Contents: Read-only** (lưu mã hoá trên máy,
+  chỉ gửi tới `api.github.com`).
+- Lần đầu cập nhật Android hỏi "Cho phép cài từ nguồn này" → bật cho Thu chi MB. Android 12+ từ lần thứ 2 cài không cần bấm xác nhận.
+- Bản đầu tiên có tính năng này vẫn phải cài tay 1 lần.
 
 - Không dùng thư viện ngoài nào trừ WorkManager; hàng đợi là SQLite gốc của Android. minSdk 26.
 - `android/app/debug.keystore` là khoá ký cố định để bản build mới cài đè được bản cũ.

@@ -11,8 +11,10 @@ android {
         applicationId = "vn.mbfinance.tracker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.4"
+        // CI đặt VERSION_CODE = 100 + số lần chạy workflow (luôn tăng) để app tự cập nhật nhận ra bản mới;
+        // build ở máy dùng giá trị mặc định
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 9
+        versionName = System.getenv("VERSION_NAME") ?: "1.5"
     }
 
     // Khoá ký cố định (nằm trong repo riêng tư) để mỗi lần build mới có thể cài đè bản cũ
